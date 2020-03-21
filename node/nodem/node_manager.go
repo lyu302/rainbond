@@ -33,6 +33,7 @@ import (
 	"github.com/goodrain/rainbond/node/api"
 	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/node/nodem/controller"
+	"github.com/goodrain/rainbond/node/nodem/gc"
 	"github.com/goodrain/rainbond/node/nodem/healthy"
 	"github.com/goodrain/rainbond/node/nodem/info"
 	"github.com/goodrain/rainbond/node/nodem/monitor"
@@ -40,11 +41,12 @@ import (
 	"github.com/goodrain/rainbond/util"
 )
 
+var sandboxImage = "k8s.gcr.io/pause-amd64:latest"
+
 //NodeManager node manager
 type NodeManager struct {
 	currentNode *client.HostNode
 	ctx         context.Context
-	cancel      context.CancelFunc
 	cluster     client.ClusterClient
 	monitor     monitor.Manager
 	healthy     healthy.Manager
@@ -52,33 +54,45 @@ type NodeManager struct {
 	cfg         *option.Conf
 	apim        *api.Manager
 	clm         *logger.ContainerLogManage
+
+	imageGCManager gc.ImageGCManager
 }
 
 //NewNodeManager new a node manager
-func NewNodeManager(conf *option.Conf) (*NodeManager, error) {
+func NewNodeManager(ctx context.Context, conf *option.Conf) (*NodeManager, error) {
 	healthyManager := healthy.CreateManager()
 	cluster := client.NewClusterClient(conf)
-	monitor, err := monitor.CreateManager(conf)
+	monitor, err := monitor.CreateManager(ctx, conf)
 	if err != nil {
 		return nil, err
 	}
 	clm := logger.CreatContainerLogManage(conf)
 	controller := controller.NewManagerService(conf, healthyManager, cluster)
-	uid, err := util.ReadHostID(conf.HostIDFile)
 	if err != nil {
 		return nil, fmt.Errorf("Get host id error:%s", err.Error())
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+
+	imageGCPolicy := gc.ImageGCPolicy{
+		MinAge:               conf.ImageMinimumGCAge,
+		ImageGCPeriod:        conf.ImageGCPeriod,
+		HighThresholdPercent: int(conf.ImageGCHighThresholdPercent),
+		LowThresholdPercent:  int(conf.ImageGCLowThresholdPercent),
+	}
+	imageGCManager, err := gc.NewImageGCManager(conf.DockerCli, imageGCPolicy, sandboxImage)
+	if err != nil {
+		return nil, fmt.Errorf("create new imageGCManager: %v", err)
+	}
+
 	nodem := &NodeManager{
-		cfg:         conf,
-		ctx:         ctx,
-		cancel:      cancel,
-		cluster:     cluster,
-		monitor:     monitor,
-		healthy:     healthyManager,
-		controller:  controller,
-		clm:         clm,
-		currentNode: &client.HostNode{ID: uid},
+		cfg:            conf,
+		ctx:            ctx,
+		cluster:        cluster,
+		monitor:        monitor,
+		healthy:        healthyManager,
+		controller:     controller,
+		clm:            clm,
+		currentNode:    &client.HostNode{ID: conf.HostID},
+		imageGCManager: imageGCManager,
 	}
 	return nodem, nil
 }
@@ -128,6 +142,14 @@ func (n *NodeManager) Start(errchan chan error) error {
 	} else {
 		logrus.Infof("this node(%s) is not compute node or disable collect container log ,do not start container log manage", n.currentNode.Role)
 	}
+
+	if n.cfg.EnableImageGC {
+		if n.currentNode.Role.HasRule(client.ManageNode) && !n.currentNode.Role.HasRule(client.ComputeNode) {
+			n.imageGCManager.SetServiceImages(n.controller.ListServiceImages())
+			go n.imageGCManager.Start()
+		}
+	}
+
 	go n.monitor.Start(errchan)
 	go n.heartbeat()
 	return nil
@@ -135,7 +157,6 @@ func (n *NodeManager) Start(errchan chan error) error {
 
 //Stop Stop
 func (n *NodeManager) Stop() {
-	n.cancel()
 	n.cluster.DownNode(n.currentNode)
 	if n.controller != nil {
 		n.controller.Stop()
@@ -158,10 +179,10 @@ func (n *NodeManager) CheckNodeHealthy() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("get all services error,%s", err.Error())
 	}
-	for _, v := range *services {
+	for _, v := range services {
 		result, ok := n.healthy.GetServiceHealthy(v.Name)
 		if ok {
-			if result.Status != service.Stat_healthy {
+			if result.Status != service.Stat_healthy && result.Status != service.Stat_Unknow {
 				return false, fmt.Errorf(result.Info)
 			}
 		} else {
@@ -173,68 +194,53 @@ func (n *NodeManager) CheckNodeHealthy() (bool, error) {
 
 func (n *NodeManager) heartbeat() {
 	util.Exec(n.ctx, func() error {
-		//TODO:Judge state
 		allServiceHealth := n.healthy.GetServiceHealth()
 		allHealth := true
-		n.currentNode.NodeStatus.AdviceAction = nil
-		n.currentNode.NodeStatus.Conditions = nil
 		for k, v := range allServiceHealth {
 			if ser := n.controller.GetService(k); ser != nil {
+				status := client.ConditionTrue
+				message := ""
+				reason := ""
 				if ser.ServiceHealth != nil {
 					maxNum := ser.ServiceHealth.MaxErrorsNum
 					if maxNum < 2 {
 						maxNum = 2
 					}
-					if v.Status != service.Stat_healthy && v.ErrorNumber > maxNum {
+					if v.Status != service.Stat_healthy && v.Status != service.Stat_Unknow && v.ErrorNumber > maxNum {
 						allHealth = false
-						n.currentNode.UpdataCondition(
-							client.NodeCondition{
-								Type:               client.NodeConditionType(ser.Name),
-								Status:             client.ConditionFalse,
-								LastHeartbeatTime:  time.Now(),
-								LastTransitionTime: time.Now(),
-								Message:            v.Info,
-								Reason:             "NotHealth",
-							})
-					}
-					if v.Status == service.Stat_healthy {
-						old := n.currentNode.GetCondition(client.NodeConditionType(ser.Name))
-						if old == nil || old.Status == client.ConditionFalse {
-							n.currentNode.UpdataCondition(
-								client.NodeCondition{
-									Type:               client.NodeConditionType(ser.Name),
-									Status:             client.ConditionTrue,
-									LastHeartbeatTime:  time.Now(),
-									LastTransitionTime: time.Now(),
-									Reason:             "Health",
-								})
-						}
-					}
-					if n.cfg.AutoUnschedulerUnHealthDuration == 0 {
-						continue
-					}
-					if v.ErrorDuration > n.cfg.AutoUnschedulerUnHealthDuration && n.cfg.AutoScheduler {
-						n.currentNode.NodeStatus.AdviceAction = []string{"unscheduler"}
-					}
-				} else {
-					old := n.currentNode.GetCondition(client.NodeConditionType(ser.Name))
-					if old == nil {
-						n.currentNode.UpdataCondition(
-							client.NodeCondition{
-								Type:               client.NodeConditionType(ser.Name),
-								Status:             client.ConditionTrue,
-								LastHeartbeatTime:  time.Now(),
-								LastTransitionTime: time.Now(),
-							})
+						status = client.ConditionFalse
+						message = v.Info
+						reason = "NotHealth"
 					}
 				}
+				n.currentNode.GetAndUpdateCondition(client.NodeConditionType(ser.Name), status, reason, message)
+				if n.cfg.AutoUnschedulerUnHealthDuration == 0 {
+					continue
+				}
+				if v.ErrorDuration > n.cfg.AutoUnschedulerUnHealthDuration && n.cfg.AutoScheduler && n.currentNode.Role.HasRule(client.ComputeNode) {
+					n.currentNode.NodeStatus.AdviceAction = []string{"unscheduler"}
+					logrus.Warningf("node unhealth more than %s(service %s unhealth), will send unscheduler advice action to master", n.cfg.AutoUnschedulerUnHealthDuration.String(), ser.Name)
+				}
+			} else {
+				logrus.Errorf("can not find service %s", k)
 			}
 		}
+		//remove old condition
+		var deleteCondition []client.NodeConditionType
+		for _, con := range n.currentNode.NodeStatus.Conditions {
+			if n.controller.GetService(string(con.Type)) == nil && !client.IsMasterCondition(con.Type) {
+				deleteCondition = append(deleteCondition, con.Type)
+			}
+		}
+		//node ready condition update
+		n.currentNode.UpdateReadyStatus()
+
 		if allHealth && n.cfg.AutoScheduler {
 			n.currentNode.NodeStatus.AdviceAction = []string{"scheduler"}
 		}
+		n.currentNode.Status = "running"
 		n.currentNode.NodeStatus.Status = "running"
-		if err := n.cluster.UpdateStatus(n.currentNode, n.getInitLable(n.currentNode)); err != nil {
+		if err := n.cluster.UpdateStatus(n.currentNode, deleteCondition); err != nil {
 			logrus.Errorf("update node status error %s", err.Error())
 		}
 		if n.currentNode.NodeStatus.Status != "running" {
@@ -266,19 +272,14 @@ func (n *NodeManager) init() error {
 			return fmt.Errorf("find node %s from cluster failure %s", n.currentNode.ID, err.Error())
 		}
 	}
-	if node.NodeStatus.NodeInfo.OperatingSystem == "" {
-		node.NodeStatus.NodeInfo = info.GetSystemInfo()
-	}
-	if node.AvailableMemory == 0 {
-		node.AvailableMemory = int64(node.NodeStatus.NodeInfo.MemorySize)
-	}
-	if node.AvailableCPU == 0 {
-		node.AvailableCPU = int64(runtime.NumCPU())
-	}
 	//update node mode
 	node.Mode = n.cfg.RunMode
 	//update node rule
 	node.Role = strings.Split(n.cfg.NodeRule, ",")
+	//update system info
+	if !node.Role.HasRule("compute") {
+		node.NodeStatus.NodeInfo = info.GetSystemInfo()
+	}
 	//set node labels
 	n.setNodeLabels(node)
 	*(n.currentNode) = *node
@@ -286,9 +287,13 @@ func (n *NodeManager) init() error {
 }
 
 func (n *NodeManager) setNodeLabels(node *client.HostNode) {
+	// node info comes from etcd
 	if node.Labels == nil {
-		node.Labels = n.getInitLable(node)
+		node.Labels = n.getInitLabel(node)
 		return
+	}
+	if node.CustomLabels == nil {
+		node.CustomLabels = make(map[string]string)
 	}
 	var newLabels = map[string]string{}
 	//remove node rule labels
@@ -297,26 +302,26 @@ func (n *NodeManager) setNodeLabels(node *client.HostNode) {
 			newLabels[k] = v
 		}
 	}
-	for k, v := range n.getInitLable(node) {
+	for k, v := range n.getInitLabel(node) {
 		newLabels[k] = v
 	}
 	node.Labels = newLabels
 }
 
-//getInitLable update node role and return new lables
-func (n *NodeManager) getInitLable(node *client.HostNode) map[string]string {
-	lables := map[string]string{}
+//getInitLabel update node role and return new lables
+func (n *NodeManager) getInitLabel(node *client.HostNode) map[string]string {
+	labels := map[string]string{}
 	for _, rule := range node.Role {
-		lables["rainbond_node_rule_"+rule] = "true"
+		labels["rainbond_node_rule_"+rule] = "true"
 	}
-	lables[client.LabelOS] = runtime.GOOS
+	labels[client.LabelOS] = runtime.GOOS
 	hostname, _ := os.Hostname()
 	if node.HostName != hostname && hostname != "" {
 		node.HostName = hostname
 	}
-	lables["rainbond_node_hostname"] = node.HostName
-	lables["rainbond_node_ip"] = node.InternalIP
-	return lables
+	labels["rainbond_node_hostname"] = node.HostName
+	labels["kubernetes.io/hostname"] = node.InternalIP
+	return labels
 }
 
 //getCurrentNode get current node info
@@ -331,12 +336,6 @@ func (n *NodeManager) getCurrentNode(uid string) (*client.HostNode, error) {
 	node := CreateNode(uid, n.cfg.HostIP)
 	n.setNodeLabels(&node)
 	node.NodeStatus.NodeInfo = info.GetSystemInfo()
-	node.UpdataCondition(client.NodeCondition{
-		Type:               client.NodeInit,
-		Status:             client.ConditionTrue,
-		LastHeartbeatTime:  time.Now(),
-		LastTransitionTime: time.Now(),
-	})
 	node.Mode = n.cfg.RunMode
 	node.NodeStatus.Status = "running"
 	return &node, nil

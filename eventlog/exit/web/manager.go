@@ -20,8 +20,10 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/goodrain/rainbond/eventlog/cluster"
@@ -29,27 +31,25 @@ import (
 	"github.com/goodrain/rainbond/eventlog/conf"
 	"github.com/goodrain/rainbond/eventlog/exit/monitor"
 	"github.com/goodrain/rainbond/eventlog/store"
-
-	"golang.org/x/net/context"
-
-	"fmt"
-
-	"strings"
-
-	_ "net/http/pprof"
+	"github.com/goodrain/rainbond/util"
+	httputil "github.com/goodrain/rainbond/util/http"
 
 	"github.com/Sirupsen/logrus"
-	httputil "github.com/goodrain/rainbond/util/http"
+	"github.com/coreos/etcd/clientv3"
+	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/middleware"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/version"
 	"github.com/twinj/uuid"
+	"golang.org/x/net/context"
 )
 
 //SocketServer socket 服务
 type SocketServer struct {
 	conf                 conf.WebSocketConf
+	discoverConf         conf.DiscoverConf
 	log                  *logrus.Entry
 	cancel               func()
 	context              context.Context
@@ -59,10 +59,11 @@ type SocketServer struct {
 	timeout              time.Duration
 	cluster              cluster.Cluster
 	healthInfo           map[string]string
+	etcdClient           *clientv3.Client
 }
 
 //NewSocket 创建zmq sub客户端
-func NewSocket(conf conf.WebSocketConf, log *logrus.Entry, storeManager store.Manager, c cluster.Cluster, healthInfo map[string]string) *SocketServer {
+func NewSocket(conf conf.WebSocketConf, discoverConf conf.DiscoverConf, etcdClient *clientv3.Client, log *logrus.Entry, storeManager store.Manager, c cluster.Cluster, healthInfo map[string]string) *SocketServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	d, err := time.ParseDuration(conf.TimeOut)
 	if err != nil {
@@ -71,6 +72,7 @@ func NewSocket(conf conf.WebSocketConf, log *logrus.Entry, storeManager store.Ma
 
 	return &SocketServer{
 		conf:         conf,
+		discoverConf: discoverConf,
 		log:          log,
 		cancel:       cancel,
 		context:      ctx,
@@ -80,6 +82,7 @@ func NewSocket(conf conf.WebSocketConf, log *logrus.Entry, storeManager store.Ma
 		timeout:      d,
 		cluster:      c,
 		healthInfo:   healthInfo,
+		etcdClient:   etcdClient,
 	}
 }
 
@@ -438,15 +441,22 @@ func (s *SocketServer) Run() error {
 	return nil
 }
 func (s *SocketServer) listen() {
-	http.HandleFunc("/event_log", s.pushEventMessage)
-	http.HandleFunc("/docker_log", s.pushDockerLog)
-	http.HandleFunc("/monitor_message", s.pushMonitorMessage)
-	http.HandleFunc("/new_monitor_message", s.pushNewMonitorMessage)
-	http.HandleFunc("/monitor", func(w http.ResponseWriter, r *http.Request) {
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	// deprecated
+	r.Get("/event_log", s.pushEventMessage)
+	// deprecated
+	r.Get("/docker_log", s.pushDockerLog)
+	// deprecated
+	r.Get("/monitor_message", s.pushMonitorMessage)
+	// deprecated
+	r.Get("/new_monitor_message", s.pushNewMonitorMessage)
+
+	r.Get("/monitor", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
 	})
-	http.HandleFunc("/docker-instance", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/docker-instance", func(w http.ResponseWriter, r *http.Request) {
 		ServiceID := r.FormValue("service_id")
 		if ServiceID == "" {
 			w.WriteHeader(412)
@@ -455,7 +465,7 @@ func (s *SocketServer) listen() {
 		}
 		s.log.Info("ServiceID:" + ServiceID)
 		instance := s.cluster.GetSuitableInstance(ServiceID)
-		err := discover.SaveDockerLogInInstance(s.context, ServiceID, instance.HostID)
+		err := discover.SaveDockerLogInInstance(s.etcdClient, s.discoverConf, ServiceID, instance.HostID)
 		if err != nil {
 			s.log.Error("Save docker service and instance id to etcd error.")
 			w.WriteHeader(500)
@@ -466,21 +476,26 @@ func (s *SocketServer) listen() {
 		url := fmt.Sprintf("tcp://%s:%d", instance.HostIP, instance.DockerLogPort)
 		w.Write([]byte(`{"host":"` + url + `","status":"success"}`))
 	})
-	http.HandleFunc("/event_push", s.receiveEventMessage)
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/event_push", s.receiveEventMessage)
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		if s.healthInfo["status"] != "health" {
 			httputil.ReturnError(r, w, 400, "eventlog service unusual")
 		}
 		httputil.ReturnSuccess(r, w, s.healthInfo)
 	})
+	// new websocket pubsub
+	r.Get("/services/{serviceID}/pubsub", s.pubsub)
+	r.Get("/tenants/{tenantName}/services/{serviceID}/logs", s.getDockerLogs)
 	//monitor setting
-	s.prometheus()
+	s.prometheus(r)
+	//pprof debug
+	util.ProfilerSetup(r)
 
 	if s.conf.SSL {
 		go func() {
 			addr := fmt.Sprintf("%s:%d", s.conf.BindIP, s.conf.SSLBindPort)
 			s.log.Infof("web socket ssl server listen %s", addr)
-			err := http.ListenAndServeTLS(addr, s.conf.CertFile, s.conf.KeyFile, nil)
+			err := http.ListenAndServeTLS(addr, s.conf.CertFile, s.conf.KeyFile, r)
 			if err != nil {
 				s.log.Error("websocket listen error.", err.Error())
 				s.listenErr <- err
@@ -489,7 +504,7 @@ func (s *SocketServer) listen() {
 	}
 	addr := fmt.Sprintf("%s:%d", s.conf.BindIP, s.conf.BindPort)
 	s.log.Infof("web socket server listen %s", addr)
-	err := http.ListenAndServe(addr, nil)
+	err := http.ListenAndServe(addr, r)
 	if err != nil {
 		s.log.Error("websocket listen error.", err.Error())
 		s.listenErr <- err
@@ -554,11 +569,11 @@ func (s *SocketServer) receiveEventMessage(w http.ResponseWriter, r *http.Reques
 	return
 }
 
-func (s *SocketServer) prometheus() {
+func (s *SocketServer) prometheus(r *chi.Mux) {
 	prometheus.MustRegister(version.NewCollector("event_log"))
 	exporter := monitor.NewExporter(s.storemanager, s.cluster)
 	prometheus.MustRegister(exporter)
-	http.Handle(s.conf.PrometheusMetricPath, promhttp.Handler())
+	r.Handle(s.conf.PrometheusMetricPath, promhttp.Handler())
 }
 
 //ResponseType 返回内容

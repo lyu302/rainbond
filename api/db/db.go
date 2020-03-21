@@ -22,18 +22,18 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/goodrain/rainbond/cmd/api/option"
-	"github.com/goodrain/rainbond/db"
-	"github.com/goodrain/rainbond/db/config"
-	"github.com/goodrain/rainbond/event"
-	"github.com/goodrain/rainbond/mq/api/grpc/pb"
-	"github.com/goodrain/rainbond/mq/client"
-	"github.com/goodrain/rainbond/worker/discover/model"
-
 	"github.com/Sirupsen/logrus"
 	tsdbClient "github.com/bluebreezecf/opentsdb-goclient/client"
 	tsdbConfig "github.com/bluebreezecf/opentsdb-goclient/config"
+	"github.com/goodrain/rainbond/cmd/api/option"
+	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/db/config"
 	dbModel "github.com/goodrain/rainbond/db/model"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/mq/api/grpc/pb"
+	"github.com/goodrain/rainbond/mq/client"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
+	"github.com/goodrain/rainbond/worker/discover/model"
 	"github.com/jinzhu/gorm"
 )
 
@@ -76,18 +76,23 @@ func CreateEventManager(conf option.Config) error {
 	var tryTime time.Duration
 	tryTime = 0
 	var err error
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: conf.EtcdEndpoint,
+		CaFile:    conf.EtcdCaFile,
+		CertFile:  conf.EtcdCertFile,
+		KeyFile:   conf.EtcdKeyFile,
+	}
 	for tryTime < 4 {
 		tryTime++
 		if err = event.NewManager(event.EventConfig{
 			EventLogServers: conf.EventLogServers,
-			DiscoverAddress: conf.EtcdEndpoint,
+			DiscoverArgs:    etcdClientArgs,
 		}); err != nil {
 			logrus.Errorf("get event manager failed, try time is %v,%s", tryTime, err.Error())
 			time.Sleep((5 + tryTime*10) * time.Second)
 		} else {
 			break
 		}
-		//defer event.CloseManager()
 	}
 	if err != nil {
 		logrus.Errorf("get event manager failed. %v", err.Error())
@@ -99,13 +104,13 @@ func CreateEventManager(conf option.Config) error {
 
 //MQManager mq manager
 type MQManager struct {
-	EtcdEndpoint  []string
-	DefaultServer string
+	EtcdClientArgs *etcdutil.ClientArgs
+	DefaultServer  string
 }
 
 //NewMQManager new mq manager
 func (m *MQManager) NewMQManager() (client.MQClient, error) {
-	client, err := client.NewMqClient(m.EtcdEndpoint, m.DefaultServer)
+	client, err := client.NewMqClient(m.EtcdClientArgs, m.DefaultServer)
 	if err != nil {
 		logrus.Errorf("new mq manager error, %v", err)
 		return client, err
@@ -168,20 +173,21 @@ func dbInit() error {
 	if err := begin.Where("class_level=? and prefix=?", "server_source", "/v2/show").Find(&rac).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			data := map[string]string{
-				"/v2/show":       "server_source",
-				"/v2/opentsdb":   "server_source",
-				"/v2/resources":  "server_source",
-				"/v2/builder":    "server_source",
-				"/v2/tenants":    "server_source",
-				"/v2/app":        "server_source",
-				"/v2/port":       "server_source",
-				"/api/v1":        "server_source",
-				"/v2/nodes":      "node_manager",
-				"/v2/job":        "node_manager",
-				"/v2/tasks":      "node_manager",
-				"/v2/taskgroups": "node_manager",
-				"/v2/tasktemps":  "node_manager",
-				"/v2/configs":    "node_manager",
+				"/v2/show":           "server_source",
+				"/v2/cluster":        "server_source",
+				"/v2/resources":      "server_source",
+				"/v2/builder":        "server_source",
+				"/v2/tenants":        "server_source",
+				"/v2/app":            "server_source",
+				"/v2/port":           "server_source",
+				"/v2/volume-options": "server_source",
+				"/api/v1":            "server_source",
+				"/v2/events":         "server_source",
+				"/v2/gateway/ips":    "server_source",
+				"/v2/gateway/ports":  "server_source",
+				"/v2/nodes":          "node_manager",
+				"/v2/job":            "node_manager",
+				"/v2/configs":        "node_manager",
 			}
 			tx := begin
 			var rollback bool

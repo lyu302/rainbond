@@ -20,6 +20,8 @@ package kubecache
 
 import (
 	"fmt"
+	"github.com/eapache/channels"
+	"k8s.io/apimachinery/pkg/labels"
 	"math"
 	"strings"
 	"time"
@@ -31,33 +33,58 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
-	v1beta1 "k8s.io/api/policy/v1beta1"
+	"k8s.io/api/policy/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
+
+// EventType -
+type EventType string
 
 const (
 	//EvictionKind EvictionKind
 	EvictionKind = "Eviction"
 	//EvictionSubresource EvictionSubresource
 	EvictionSubresource = "pods/eviction"
+	// CreateEvent event associated with new objects in an informer
+	CreateEvent EventType = "CREATE"
+	// UpdateEvent event associated with an object update in an informer
+	UpdateEvent EventType = "UPDATE"
+	// DeleteEvent event associated when an object is removed from an informer
+	DeleteEvent EventType = "DELETE"
 )
+
+// Event holds the context of an event.
+type Event struct {
+	Type EventType
+	Obj  interface{}
+}
+
+type l map[string]string
+
+func (l l) contains(k, v string) bool {
+	if l == nil {
+		return false
+	}
+	if val, ok := l[k]; !ok || val != v {
+		return false
+	}
+	return true
+}
 
 //KubeClient KubeClient
 type KubeClient interface {
-	GetKubeClient() kubernetes.Interface
 	UpK8sNode(*client.HostNode) (*v1.Node, error)
 	DownK8sNode(nodename string) error
 	GetAllPods() (pods []*v1.Pod, err error)
 	GetPods(namespace string) (pods []*v1.Pod, err error)
+	GetPodsBySelector(namespace string, selector labels.Selector) (pods []*v1.Pod, err error)
 	GetNodeByName(nodename string) (*v1.Node, error)
 	GetNodes() ([]*v1.Node, error)
 	GetNode(nodeName string) (*v1.Node, error)
@@ -72,50 +99,34 @@ type KubeClient interface {
 }
 
 //NewKubeClient NewKubeClient
-func NewKubeClient(cfg *conf.Conf) (KubeClient, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", cfg.K8SConfPath)
-	if err != nil {
-		return nil, err
-	}
-	config.QPS = 50
-	config.Burst = 100
-	cli, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
+func NewKubeClient(cfg *conf.Conf, clientset kubernetes.Interface) (KubeClient, error) {
 	stop := make(chan struct{})
-	sharedInformers := informers.NewFilteredSharedInformerFactory(cli, cfg.MinResyncPeriod, v1.NamespaceAll,
-		func(options *metav1.ListOptions) {
-			//options.LabelSelector = "creater=Rainbond"
-		})
-	sharedInformers.Core().V1().Services().Informer()
+	sharedInformers := informers.NewSharedInformerFactoryWithOptions(clientset, cfg.MinResyncPeriod)
+
 	sharedInformers.Core().V1().Endpoints().Informer()
+	sharedInformers.Core().V1().Services().Informer()
 	sharedInformers.Core().V1().ConfigMaps().Informer()
 	sharedInformers.Core().V1().Nodes().Informer()
 	sharedInformers.Core().V1().Pods().Informer()
 	sharedInformers.Start(stop)
 	return &kubeClient{
-		kubeclient:      cli,
+		kubeclient:      clientset,
 		stop:            stop,
 		sharedInformers: sharedInformers,
 	}, nil
 }
 
 type kubeClient struct {
-	kubeclient      *kubernetes.Clientset
+	kubeclient      kubernetes.Interface
 	sharedInformers informers.SharedInformerFactory
 	stop            chan struct{}
+	updateCh        *channels.RingChannel
 }
 
 func (k *kubeClient) Stop() {
 	if k.stop != nil {
 		close(k.stop)
 	}
-}
-
-//GetKubeClient get kube client
-func (k *kubeClient) GetKubeClient() kubernetes.Interface {
-	return k.kubeclient
 }
 
 //GetNodeByName get node
@@ -168,7 +179,7 @@ func (k *kubeClient) DeleteOrEvictPodsSimple(nodeName string) error {
 	return nil
 }
 func (k *kubeClient) GetPodsByNodes(nodeName string) (pods []v1.Pod, err error) {
-	podList, err := k.kubeclient.Core().Pods(metav1.NamespaceAll).List(metav1.ListOptions{
+	podList, err := k.kubeclient.CoreV1().Pods(metav1.NamespaceAll).List(metav1.ListOptions{
 		FieldSelector: fields.SelectorFromSet(fields.Set{"spec.nodeName": nodeName}).String()})
 	if err != nil {
 		return pods, err
@@ -182,14 +193,7 @@ func (k *kubeClient) GetPodsByNodes(nodeName string) (pods []v1.Pod, err error) 
 //evictPod 驱离POD
 func (k *kubeClient) evictPod(pod v1.Pod, policyGroupVersion string) error {
 	deleteOptions := &metav1.DeleteOptions{}
-	//if o.GracePeriodSeconds >= 0 {
-	//	gracePeriodSeconds := int64(o.GracePeriodSeconds)
-	//	deleteOptions.GracePeriodSeconds = &gracePeriodSeconds
-	//}
-
 	eviction := &v1beta1.Eviction{
-		///Users/goodrain/go/src/k8s.io/kubernetes/pkg/apis/policy/types.go
-		///Users/goodrain/go/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: policyGroupVersion,
 			Kind:       EvictionKind,
@@ -201,7 +205,7 @@ func (k *kubeClient) evictPod(pod v1.Pod, policyGroupVersion string) error {
 		DeleteOptions: deleteOptions,
 	}
 	// Remember to change change the URL manipulation func when Evction's version change
-	return k.kubeclient.Policy().Evictions(eviction.Namespace).Evict(eviction)
+	return k.kubeclient.PolicyV1beta1().Evictions(eviction.Namespace).Evict(eviction)
 }
 
 // deleteOrEvictPods deletes or evicts the pods on the api server
@@ -218,22 +222,15 @@ func (k *kubeClient) deleteOrEvictPods(pods []v1.Pod) error {
 	}
 
 	return k.evictPods(pods, policyGroupVersion, getPodFn)
-	//if len(policyGroupVersion) > 0 {
-	//	//return evictPods(pods, policyGroupVersion, getPodFn)
-	//} else {
-	//	return deletePods(pods, getPodFn)
-	//}
 }
 
 func (k *kubeClient) deletePods(pods []v1.Pod, getPodFn func(namespace, name string) (*v1.Pod, error)) error {
 	// 0 timeout means infinite, we use MaxInt64 to represent it.
 	var globalTimeout time.Duration
 	if conf.Config.ReqTimeout == 0 {
-		//if Timeout == 0 {
 		globalTimeout = time.Duration(math.MaxInt64)
 	} else {
 		globalTimeout = 1
-		//globalTimeout = Timeout
 	}
 	for _, pod := range pods {
 		err := k.deletePod(pod)
@@ -435,10 +432,11 @@ func (k *kubeClient) UpK8sNode(rainbondNode *client.HostNode) (*v1.Node, error) 
 	capacity := make(v1.ResourceList)
 	capacity[v1.ResourceCPU] = *resource.NewQuantity(rainbondNode.AvailableCPU, resource.BinarySI)
 	capacity[v1.ResourceMemory] = *resource.NewQuantity(rainbondNode.AvailableMemory, resource.BinarySI)
+	lbs := rainbondNode.MergeLabels()
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   strings.ToLower(rainbondNode.ID),
-			Labels: rainbondNode.Labels,
+			Labels: lbs,
 		},
 		Spec: v1.NodeSpec{
 			Unschedulable: rainbondNode.Unschedulable,
@@ -454,14 +452,18 @@ func (k *kubeClient) UpK8sNode(rainbondNode *client.HostNode) (*v1.Node, error) 
 			},
 		},
 	}
-	//set rainbond creater lable
-	node.Labels["creater"] = "Rainbond"
+	//set rainbond creator lable
+	node.Labels["creator"] = "Rainbond"
 	savedNode, err := k.kubeclient.CoreV1().Nodes().Create(node)
 	if err != nil {
 		return nil, err
 	}
 	logrus.Info("creating new node success , details: %v ", savedNode)
 	return node, nil
+}
+
+func (k *kubeClient) GetPodsBySelector(namespace string, selector labels.Selector) ([]*v1.Pod, error) {
+	return k.sharedInformers.Core().V1().Pods().Lister().Pods(namespace).List(selector)
 }
 
 func (k *kubeClient) GetEndpoints(namespace string, selector labels.Selector) ([]*v1.Endpoints, error) {

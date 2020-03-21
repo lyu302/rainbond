@@ -25,7 +25,6 @@ import (
 	"github.com/goodrain/rainbond/db/config"
 	"github.com/goodrain/rainbond/db/dao"
 	"github.com/goodrain/rainbond/db/mysql"
-
 	"github.com/jinzhu/gorm"
 )
 
@@ -33,8 +32,11 @@ import (
 type Manager interface {
 	CloseManager() error
 	Begin() *gorm.DB
+	EnsureEndTransactionFunc() func(tx *gorm.DB)
+	VolumeTypeDao() dao.VolumeTypeDao
 	LicenseDao() dao.LicenseDao
 	AppDao() dao.AppDao
+	EnterpriseDao() dao.EnterpriseDao
 	TenantDao() dao.TenantDao
 	TenantDaoTransactions(db *gorm.DB) dao.TenantDao
 	TenantServiceDao() dao.TenantServiceDao
@@ -95,6 +97,7 @@ type Manager interface {
 
 	NotificationEventDao() dao.NotificationEventDao
 	AppBackupDao() dao.AppBackupDao
+	AppBackupDaoTransactions(db *gorm.DB) dao.AppBackupDao
 	ServiceSourceDao() dao.ServiceSourceDao
 
 	// gateway
@@ -106,9 +109,6 @@ type Manager interface {
 	HTTPRuleDaoTransactions(db *gorm.DB) dao.HTTPRuleDao
 	TCPRuleDao() dao.TCPRuleDao
 	TCPRuleDaoTransactions(db *gorm.DB) dao.TCPRuleDao
-	IPPortDao() dao.IPPortDao
-	IPPortDaoTransactions(db *gorm.DB) dao.IPPortDao
-	IPPoolDao() dao.IPPoolDao
 	GwRuleConfigDao() dao.GwRuleConfigDao
 	GwRuleConfigDaoTransactions(db *gorm.DB) dao.GwRuleConfigDao
 
@@ -117,13 +117,20 @@ type Manager interface {
 	EndpointsDaoTransactions(db *gorm.DB) dao.EndpointsDao
 	ThirdPartySvcDiscoveryCfgDao() dao.ThirdPartySvcDiscoveryCfgDao
 	ThirdPartySvcDiscoveryCfgDaoTransactions(db *gorm.DB) dao.ThirdPartySvcDiscoveryCfgDao
+
+	TenantServceAutoscalerRulesDao() dao.TenantServceAutoscalerRulesDao
+	TenantServceAutoscalerRulesDaoTransactions(db *gorm.DB) dao.TenantServceAutoscalerRulesDao
+	TenantServceAutoscalerRuleMetricsDao() dao.TenantServceAutoscalerRuleMetricsDao
+	TenantServceAutoscalerRuleMetricsDaoTransactions(db *gorm.DB) dao.TenantServceAutoscalerRuleMetricsDao
+	TenantServiceScalingRecordsDao() dao.TenantServiceScalingRecordsDao
+	TenantServiceScalingRecordsDaoTransactions(db *gorm.DB) dao.TenantServiceScalingRecordsDao
 }
 
 var defaultManager Manager
 
 //CreateManager 创建manager
 func CreateManager(config config.Config) (err error) {
-	if config.DBType == "mysql" || config.DBType == "cockroachdb" || config.DBType == "sqlite3" { // TODO: remove sqlite3
+	if config.DBType == "mysql" || config.DBType == "cockroachdb" {
 		defaultManager, err = mysql.CreateManager(config)
 		return err
 	}
@@ -143,4 +150,9 @@ func CloseManager() error {
 //GetManager get db manager
 func GetManager() Manager {
 	return defaultManager
+}
+
+// SetTestManager sets the default manager for unit test
+func SetTestManager(m Manager) {
+	defaultManager = m
 }

@@ -19,11 +19,13 @@
 package discover
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/goodrain/rainbond/api/proxy"
 	corediscover "github.com/goodrain/rainbond/discover"
 	corediscoverconfig "github.com/goodrain/rainbond/discover/config"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 
 	"github.com/Sirupsen/logrus"
 )
@@ -38,14 +40,12 @@ type EndpointDiscover interface {
 var defaultEndpointDiscover EndpointDiscover
 
 //CreateEndpointDiscover create endpoint discover
-func CreateEndpointDiscover(etcdEndpoints []string) (EndpointDiscover, error) {
-	if etcdEndpoints == nil {
-		etcdEndpoints = []string{"127.0.0.1:2379"}
-	}
+func CreateEndpointDiscover(etcdClientArgs *etcdutil.ClientArgs) (EndpointDiscover, error) {
 	if defaultEndpointDiscover == nil {
-		dis, err := corediscover.GetDiscover(corediscoverconfig.DiscoverConfig{
-			EtcdClusterEndpoints: etcdEndpoints,
-		})
+		if etcdClientArgs == nil {
+			return nil, errors.New("etcd args is nil")
+		}
+		dis, err := corediscover.GetDiscover(corediscoverconfig.DiscoverConfig{EtcdClientArgs: etcdClientArgs})
 		if err != nil {
 			return nil, err
 		}
@@ -57,8 +57,8 @@ func CreateEndpointDiscover(etcdEndpoints []string) (EndpointDiscover, error) {
 	return defaultEndpointDiscover, nil
 }
 
-//GetEndpointDiscover 获取endpointsdiscover
-func GetEndpointDiscover(etcdEndpoints []string) EndpointDiscover {
+//GetEndpointDiscover get endpoints discover
+func GetEndpointDiscover() EndpointDiscover {
 	return defaultEndpointDiscover
 }
 
@@ -76,6 +76,10 @@ func (e *endpointDiscover) AddProject(name string, pro proxy.Proxy) {
 		e.dis.AddProject(name, e.projects[name])
 	} else {
 		def.proxys = append(def.proxys, pro)
+		// add proxy after update endpoint first,must initialize endpoint by cache data
+		if len(def.cacheEndpointURL) > 0 {
+			pro.UpdateEndpoints(def.cacheEndpointURL...)
+		}
 	}
 
 }
@@ -91,8 +95,9 @@ func (e *endpointDiscover) Stop() {
 }
 
 type defalt struct {
-	name   string
-	proxys []proxy.Proxy
+	name             string
+	proxys           []proxy.Proxy
+	cacheEndpointURL []string
 }
 
 func (e *defalt) Error(err error) {
@@ -111,6 +116,7 @@ func (e *defalt) UpdateEndpoints(endpoints ...*corediscoverconfig.Endpoint) {
 	for _, p := range e.proxys {
 		p.UpdateEndpoints(endStr...)
 	}
+	e.cacheEndpointURL = endStr
 }
 
 //when watch occurred error,will exec this method

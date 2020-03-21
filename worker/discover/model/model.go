@@ -144,6 +144,27 @@ func NewTaskBody(taskType string, body []byte) TaskBody {
 			return nil
 		}
 		return b
+	case "service_gc":
+		b := ServiceGCTaskBody{}
+		err := ffjson.Unmarshal(body, &b)
+		if err != nil {
+			return nil
+		}
+		return b
+	case "delete_tenant":
+		b := &DeleteTenantTaskBody{}
+		err := ffjson.Unmarshal(body, &b)
+		if err != nil {
+			return nil
+		}
+		return b
+	case "refreshhpa":
+		b := &RefreshHPATaskBody{}
+		err := ffjson.Unmarshal(body, &b)
+		if err != nil {
+			return nil
+		}
+		return b
 	default:
 		return DefaultTaskBody{}
 	}
@@ -172,6 +193,10 @@ func CreateTaskBody(taskType string) TaskBody {
 		return VerticalScalingTaskBody{}
 	case "apply_plugin_config":
 		return ApplyPluginConfigTaskBody{}
+	case "delete_tenant":
+		return DeleteTenantTaskBody{}
+	case "refreshhpa":
+		return RefreshHPATaskBody{}
 	default:
 		return DefaultTaskBody{}
 	}
@@ -187,6 +212,8 @@ type StartTaskBody struct {
 	DeployVersion string            `json:"deploy_version"`
 	EventID       string            `json:"event_id"`
 	Configs       map[string]string `json:"configs"`
+	// When determining the startup sequence of services, you need to know the services they depend on
+	DepServiceIDInBootSeq []string `json:"dep_service_ids_in_boot_seq"`
 }
 
 //StopTaskBody 停止操作任务主体
@@ -204,6 +231,7 @@ type HorizontalScalingTaskBody struct {
 	ServiceID string `json:"service_id"`
 	Replicas  int32  `json:"replicas"`
 	EventID   string `json:"event_id"`
+	Username  string `json:"username"`
 }
 
 //VerticalScalingTaskBody 垂直伸缩操作任务主体
@@ -277,13 +305,14 @@ type GroupStartTaskBody struct {
 
 // ApplyRuleTaskBody contains information for ApplyRuleTask
 type ApplyRuleTaskBody struct {
-	ServiceID     string `json:"service_id"`
-	DeployVersion string `json:"deploy_version"`
-	EventID       string `json:"event_id"`
-	ServiceKind   string `json:"service_kind"`
-	Action        string `json:"action"`
-	Port          int    `json:"port"`
-	IsInner       bool   `json:"is_inner"`
+	ServiceID     string            `json:"service_id"`
+	DeployVersion string            `json:"deploy_version"`
+	EventID       string            `json:"event_id"`
+	ServiceKind   string            `json:"service_kind"`
+	Action        string            `json:"action"`
+	Port          int               `json:"port"`
+	IsInner       bool              `json:"is_inner"`
+	Limit         map[string]string `json:"limit"`
 }
 
 // ApplyPluginConfigTaskBody apply plugin dynamic discover config
@@ -308,6 +337,25 @@ type GroupStopTaskBody struct {
 	//组关闭策略
 	//顺序关系，无序并发关闭
 	Strategy []string `json:"strategy"`
+}
+
+// ServiceGCTaskBody holds the request body to execute service gc task.
+type ServiceGCTaskBody struct {
+	TenantID  string   `json:"tenant_id"`
+	ServiceID string   `json:"service_id"`
+	EventIDs  []string `json:"event_ids"`
+}
+
+// DeleteTenantTaskBody -
+type DeleteTenantTaskBody struct {
+	TenantID string `json:"tenant_id"`
+}
+
+// RefreshHPATaskBody -
+type RefreshHPATaskBody struct {
+	ServiceID string `json:"service_id"`
+	RuleID    string `json:"rule_id"`
+	EventID   string `json:"eventID"`
 }
 
 //DefaultTaskBody 默认操作任务主体

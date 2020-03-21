@@ -20,24 +20,29 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
+	"strings"
 	"time"
 
-	"github.com/goodrain/rainbond/cmd"
-
-	"k8s.io/apimachinery/pkg/api/errors"
-
-	"encoding/json"
+	"github.com/goodrain/rainbond/util"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/clientv3"
+	"github.com/goodrain/rainbond/cmd"
 	"github.com/goodrain/rainbond/cmd/node/option"
 	"github.com/goodrain/rainbond/node/core/config"
+	"k8s.io/apimachinery/pkg/api/errors"
 )
+
+// RainbondEndpointPrefix is the prefix of the key of the rainbond endpoints in etcd
+const RainbondEndpointPrefix = "/rainbond/endpoint"
 
 //ClusterClient ClusterClient
 type ClusterClient interface {
-	UpdateStatus(*HostNode, map[string]string) error
+	UpdateStatus(*HostNode, []NodeConditionType) error
 	DownNode(*HostNode) error
 	GetMasters() ([]*HostNode, error)
 	GetNode(nodeID string) (*HostNode, error)
@@ -45,7 +50,7 @@ type ClusterClient interface {
 	GetDataCenterConfig() (*config.DataCenterConfig, error)
 	GetOptions() *option.Conf
 	GetEndpoints(key string) []string
-	SetEndpoints(key string, value []string)
+	SetEndpoints(serviceName, hostIP string, value []string)
 	DelEndpoints(key string)
 }
 
@@ -61,7 +66,7 @@ type etcdClusterClient struct {
 	onlineLes clientv3.LeaseID
 }
 
-func (e *etcdClusterClient) UpdateStatus(n *HostNode, initLable map[string]string) error {
+func (e *etcdClusterClient) UpdateStatus(n *HostNode, deleteConditions []NodeConditionType) error {
 	existNode, err := e.GetNode(n.ID)
 	if err != nil {
 		return fmt.Errorf("get node %s failure where update node %s", n.ID, err.Error())
@@ -71,18 +76,29 @@ func (e *etcdClusterClient) UpdateStatus(n *HostNode, initLable map[string]strin
 	//The startup parameters shall prevail
 	existNode.Role = n.Role
 	existNode.HostName = n.HostName
+	existNode.Status = n.Status
 	existNode.NodeStatus.NodeHealth = n.NodeStatus.NodeHealth
 	existNode.NodeStatus.NodeUpdateTime = time.Now()
 	existNode.NodeStatus.Version = cmd.GetVersion()
 	existNode.NodeStatus.AdviceAction = n.NodeStatus.AdviceAction
 	existNode.NodeStatus.Status = n.NodeStatus.Status
-	if existNode.NodeStatus.NodeInfo.OperatingSystem == "" {
-		existNode.NodeStatus.NodeInfo = n.NodeStatus.NodeInfo
+	existNode.NodeStatus.NodeInfo = n.NodeStatus.NodeInfo
+	existNode.AvailableMemory = n.AvailableMemory
+	existNode.AvailableCPU = n.AvailableCPU
+	// only update system labels
+	newLabels := n.Labels
+	for k, v := range existNode.Labels {
+		if !strings.HasPrefix(k, "rainbond_node_rule_") {
+			newLabels[k] = v
+		}
 	}
-	for k, v := range initLable {
-		existNode.Labels[k] = v
-	}
+	existNode.Labels = newLabels
+	//update condition and delete old condition
 	existNode.UpdataCondition(n.NodeStatus.Conditions...)
+	for _, t := range deleteConditions {
+		existNode.DeleteCondition(t)
+		logrus.Infof("remove old condition %s", t)
+	}
 	return e.Update(existNode)
 }
 
@@ -99,42 +115,69 @@ func (e *etcdClusterClient) GetOptions() *option.Conf {
 }
 
 func (e *etcdClusterClient) GetEndpoints(key string) (result []string) {
-	key = "/rainbond/endpoint/" + key
-	ctx, cancel := context.WithCancel(context.Background())
+	key = path.Join(RainbondEndpointPrefix, key)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-
 	resp, err := e.conf.EtcdCli.Get(ctx, key, clientv3.WithPrefix())
 	if err != nil || len(resp.Kvs) < 1 {
 		logrus.Errorf("Can not get endpoints of the key %s", key)
 		return
 	}
-
 	for _, kv := range resp.Kvs {
+		keyInfo := strings.Split(string(kv.Key), "/")
+		if !util.CheckIP(keyInfo[len(keyInfo)-1]) {
+			e.conf.EtcdCli.Delete(ctx, string(kv.Key))
+			continue
+		}
 		var res []string
 		err = json.Unmarshal(kv.Value, &res)
 		if err != nil {
 			logrus.Errorf("Can unmarshal endpoints to array of the key %s", key)
 			return
 		}
-		result = append(result, res...)
+		//Return data check
+		for _, v := range res {
+			if checkURL(v) {
+				result = append(result, v)
+			}
+		}
 	}
-
-	logrus.Infof("Get endpoints %s => %v", key, result)
+	logrus.Debugf("Get endpoints %s => %v", key, result)
 	return
 }
+func checkURL(source string) bool {
+	endpointURL, err := url.Parse(source)
+	if err != nil && strings.Contains(err.Error(), "first path segment in URL cannot contain colon") {
+		endpointURL, err = url.Parse(fmt.Sprintf("tcp://%s", source))
+	}
+	if err != nil || endpointURL.Host == "" || endpointURL.Path != "" {
+		return false
+	}
+	return true
+}
 
-func (e *etcdClusterClient) SetEndpoints(key string, value []string) {
-	key = "/rainbond/endpoint/" + key
-
-	ctx, cancel := context.WithCancel(context.Background())
+//SetEndpoints service name and hostip must set
+func (e *etcdClusterClient) SetEndpoints(serviceName, hostIP string, value []string) {
+	if serviceName == "" {
+		return
+	}
+	if !util.CheckIP(hostIP) {
+		return
+	}
+	for _, v := range value {
+		if !checkURL(v) {
+			logrus.Warningf("%s service host %s endpoint value %s invalid", serviceName, hostIP, v)
+			continue
+		}
+	}
+	key := fmt.Sprintf("%s/%s/%s", RainbondEndpointPrefix, serviceName, hostIP)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-
 	jsonStr, err := json.Marshal(value)
 	if err != nil {
 		logrus.Errorf("Can not marshal %s endpoints to json.", key)
 		return
 	}
-
 	_, err = e.conf.EtcdCli.Put(ctx, key, string(jsonStr))
 	if err != nil {
 		logrus.Errorf("Failed to put endpoint for %s: %v", key, err)
@@ -142,23 +185,21 @@ func (e *etcdClusterClient) SetEndpoints(key string, value []string) {
 }
 
 func (e *etcdClusterClient) DelEndpoints(key string) {
-	key = "/rainbond/endpoint/" + key
-	logrus.Infof("Delete endpoints: %s", key)
-
-	ctx, cancel := context.WithCancel(context.Background())
+	key = path.Join(RainbondEndpointPrefix, key)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-
 	_, err := e.conf.EtcdCli.Delete(ctx, key)
 	if err != nil {
 		logrus.Errorf("Failed to put endpoint for %s: %v", key, Error)
 	}
+	logrus.Infof("Delete endpoints: %s", key)
 }
 
 //ErrorNotFound node not found.
 var ErrorNotFound = fmt.Errorf("node not found")
 
 func (e *etcdClusterClient) GetNode(nodeID string) (*HostNode, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*8)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	res, err := e.conf.EtcdCli.Get(ctx, fmt.Sprintf("%s/%s", e.conf.NodePath, nodeID))
 	if err != nil {

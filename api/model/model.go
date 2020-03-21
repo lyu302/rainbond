@@ -258,6 +258,10 @@ type ServiceStruct struct {
 	// in: body
 	// required: true
 	ServiceAlias string `json:"service_alias" validate:"service_alias"`
+	// 组件类型
+	// in: body
+	// required: true
+	ServiceType string `json:"service_type" validate:"service_type"`
 	// 服务描述
 	// in: body
 	// required: false
@@ -286,7 +290,7 @@ type ServiceStruct struct {
 	// in: body
 	// required: false
 	ContainerEnv string `json:"container_env" validate:"container_env"`
-	// 扩容方式；0:无状态；1:有状态；2:分区
+	// 扩容方式；0:无状态；1:有状态；2:分区(v5.2用于接收组件的类型)
 	// in: body
 	// required: false
 	ExtendMethod string `json:"extend_method" validate:"extend_method"`
@@ -323,7 +327,11 @@ type ServiceStruct struct {
 	// required: false
 	ServiceOrigin string `json:"service_origin" validate:"service_origin"`
 	Kind          string `json:"kind" validate:"kind|in:internal,third_party"`
-
+	EtcdKey       string `json:"etcd_key" validate:"etcd_key"`
+	//OSType runtime os type
+	// in: body
+	// required: false
+	OSType         string                               `json:"os_type" validate:"os_type|in:windows,linux"`
 	ServiceLabel   string                               `json:"service_label"  validate:"service_label|in:StatelessServiceType,StatefulServiceType"`
 	NodeLabel      string                               `json:"node_label"  validate:"node_label"`
 	Operator       string                               `json:"operator"  validate:"operator"`
@@ -499,6 +507,7 @@ type StatusList struct {
 	CurStatus     string     `json:"cur_status"`
 	ContainerCPU  int        `json:"container_cpu"`
 	StatusCN      string     `json:"status_cn"`
+	StartTime     string     `json:"start_time"`
 	PodList       []PodsList `json:"pod_list"`
 }
 
@@ -552,8 +561,21 @@ type AddTenantStruct struct {
 		// the eid
 		// in : body
 		// required: false
-		Eid   string `json:"eid" validata:"eid"`
-		Token string `json:"token" validate:"token"`
+		Eid         string `json:"eid" validata:"eid"`
+		Token       string `json:"token" validate:"token"`
+		LimitMemory int    `json:"limit_memory" validate:"limit_memory"`
+	}
+}
+
+// UpdateTenantStruct UpdateTenantStruct
+// swagger:parameters updateTenant
+type UpdateTenantStruct struct {
+	//in: body
+	Body struct {
+		// the eid
+		// in : body
+		// required: false
+		LimitMemory int `json:"limit_memory" validate:"limit_memory"`
 	}
 }
 
@@ -1388,6 +1410,7 @@ type ExportAppStruct struct {
 
 //BeatchOperationRequestStruct beatch operation request body
 type BeatchOperationRequestStruct struct {
+	Operator   string `json:"operator"`
 	TenantName string `json:"tenant_name"`
 	Body       struct {
 		Operation    string                         `json:"operation" validate:"operation|required|in:start,stop,build,upgrade"`
@@ -1430,6 +1453,8 @@ type BuildCodeInfo struct {
 	Runtime    string `json:"runtime"`
 	User       string `json:"user" validate:"user"`
 	Password   string `json:"password" validate:"password"`
+	//for .netcore source type, need cmd
+	Cmd string `json:"cmd"`
 }
 
 //BuildSlugInfo -
@@ -1514,6 +1539,8 @@ type StartOrStopInfoRequestStruct struct {
 	EventID   string            `json:"event_id"`
 	ServiceID string            `json:"service_id"`
 	Configs   map[string]string `json:"configs"`
+	// When determining the startup sequence of services, you need to know the services they depend on
+	DepServiceIDInBootSeq []string `json:"dep_service_ids_in_boot_seq"`
 }
 
 //BuildMQBodyFrom -

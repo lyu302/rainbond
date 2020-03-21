@@ -58,10 +58,11 @@ type Manager struct {
 	stopChan        chan struct{}
 	r               *chi.Mux
 	prometheusProxy proxy.Proxy
+	etcdcli         *clientv3.Client
 }
 
 //NewManager newManager
-func NewManager(c option.Config) *Manager {
+func NewManager(c option.Config, etcdcli *clientv3.Client) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	//controller.CreateV2RouterManager(c)
 	r := chi.NewRouter()
@@ -107,6 +108,7 @@ func NewManager(c option.Config) *Manager {
 		conf:     c,
 		stopChan: make(chan struct{}),
 		r:        r,
+		etcdcli:  etcdcli,
 	}
 }
 
@@ -139,7 +141,9 @@ func (m *Manager) Stop() error {
 //Run run
 func (m *Manager) Run() {
 
-	v2R := &version2.V2{}
+	v2R := &version2.V2{
+		Cfg: &m.conf,
+	}
 	m.r.Mount("/v2", v2R.Routes())
 	m.r.Mount("/cloud", cloud.Routes())
 	m.r.Mount("/", doc.Routes())
@@ -191,16 +195,10 @@ func (m *Manager) Run() {
 
 //EventLogInstance 查询event server instance
 func (m *Manager) EventLogInstance(w http.ResponseWriter, r *http.Request) {
-	etcdclient, err := clientv3.New(clientv3.Config{
-		Endpoints: m.conf.EtcdEndpoint,
-	})
-	if err != nil {
-		w.WriteHeader(500)
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.ctx)
 	defer cancel()
-	res, err := etcdclient.Get(ctx, "/event/instance", clientv3.WithPrefix())
+
+	res, err := m.etcdcli.Get(ctx, "/event/instance", clientv3.WithPrefix())
 	if err != nil {
 		w.WriteHeader(500)
 		return

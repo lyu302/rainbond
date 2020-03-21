@@ -20,6 +20,7 @@ package probe
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,18 +29,19 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/node/nodem/service"
-	"github.com/goodrain/rainbond/util/prober/types/v1"
+	v1 "github.com/goodrain/rainbond/util/prober/types/v1"
 )
 
 // HTTPProbe probes through the http protocol
 type HTTPProbe struct {
-	Name         string
-	Address      string
-	ResultsChan  chan *v1.HealthStatus
-	Ctx          context.Context
-	Cancel       context.CancelFunc
-	TimeInterval int
-	MaxErrorsNum int
+	Name          string
+	Address       string
+	ResultsChan   chan *v1.HealthStatus
+	Ctx           context.Context
+	Cancel        context.CancelFunc
+	TimeInterval  int
+	MaxErrorsNum  int
+	TimeoutSecond int
 }
 
 //Check starts http probe.
@@ -60,7 +62,7 @@ func (h *HTTPProbe) HTTPCheck() {
 	timer := time.NewTimer(time.Second * time.Duration(h.TimeInterval))
 	defer timer.Stop()
 	for {
-		HealthMap := GetHTTPHealth(h.Address)
+		HealthMap := h.GetHTTPHealth()
 		result := &v1.HealthStatus{
 			Name:   h.Name,
 			Status: HealthMap["status"],
@@ -89,11 +91,18 @@ func isClientTimeout(err error) bool {
 }
 
 //GetHTTPHealth get http health
-func GetHTTPHealth(address string) map[string]string {
+func (h *HTTPProbe) GetHTTPHealth() map[string]string {
+	address := h.Address
 	c := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: time.Duration(h.TimeoutSecond) * time.Second,
 	}
-	if !strings.HasPrefix(address, "http") {
+	if strings.HasPrefix(address, "https://") {
+		c.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+	if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
+		logrus.Warnf("address %s do not has scheme, auto add http scheme", address)
 		address = "http://" + address
 	}
 	addr, err := url.Parse(address)
@@ -104,18 +113,19 @@ func GetHTTPHealth(address string) map[string]string {
 	if addr.Scheme == "" {
 		addr.Scheme = "http"
 	}
+	logrus.Debugf("http probe check address; %s", address)
 	resp, err := c.Get(addr.String())
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		if isClientTimeout(err) {
 			return map[string]string{"status": service.Stat_death, "info": "Request service timeout"}
 		}
-		logrus.Errorf("http probe request error %s", err.Error())
+		logrus.Debugf("http probe request error %s", err.Error())
 		return map[string]string{"status": service.Stat_unhealthy, "info": err.Error()}
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode >= 400 {
 		logrus.Debugf("http probe check address %s return code %d", address, resp.StatusCode)
 		return map[string]string{"status": service.Stat_unhealthy, "info": "Service unhealthy"}
 	}

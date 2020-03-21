@@ -18,6 +18,8 @@
 
 package v1
 
+import "github.com/Sirupsen/logrus"
+
 //LoadBalancingType Load Balancing type
 type LoadBalancingType string
 
@@ -94,22 +96,6 @@ func (cfg *Config) Equals(c *Config) bool {
 		return false
 	}
 
-	if len(cfg.TCPPools) != len(c.TCPPools) {
-		return false
-	}
-	for _, cfgp := range cfg.TCPPools {
-		flag := false
-		for _, cp := range c.TCPPools {
-			if cfgp.Equals(cp) {
-				flag = true
-				break
-			}
-		}
-		if !flag {
-			return false
-		}
-	}
-
 	if len(cfg.L7VS) != len(c.L7VS) {
 		return false
 	}
@@ -125,7 +111,7 @@ func (cfg *Config) Equals(c *Config) bool {
 			return false
 		}
 	}
-
+	logrus.Debugf("len if cnf.L4VS = %d, l4vs = %d", len(cfg.L4VS), len(c.L4VS))
 	if len(cfg.L4VS) != len(c.L4VS) {
 		return false
 	}

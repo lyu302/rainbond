@@ -33,7 +33,6 @@ type ServiceHandler interface {
 	AddLabel(l *api_model.LabelsStruct, serviceID string) error
 	DeleteLabel(l *api_model.LabelsStruct, serviceID string) error
 	UpdateLabel(l *api_model.LabelsStruct, serviceID string) error
-	UpdateServiceLabel(serviceID, value string) error
 	StartStopService(s *api_model.StartStopStruct) error
 	ServiceVertical(v *model.VerticalScalingTaskBody) error
 	ServiceHorizontal(h *model.HorizontalScalingTaskBody) error
@@ -50,20 +49,20 @@ type ServiceHandler interface {
 	PortVar(action string, tenantID, serviceID string, vp *api_model.ServicePorts, oldPort int) error
 	PortOuter(tenantName, serviceID string, containerPort int, servicePort *api_model.ServicePortInnerOrOuter) (*dbmodel.TenantServiceLBMappingPort, string, error)
 	PortInner(tenantName, serviceID, operation string, port int) error
-	ChangeLBPort(tenantID, serviceID string, containerPort, changelbPort int) (*dbmodel.TenantServiceLBMappingPort, *util.APIHandleError)
 	VolumnVar(avs *dbmodel.TenantServiceVolume, tenantID, fileContent, action string) *util.APIHandleError
 	UpdVolume(sid string, req *api_model.UpdVolumeReq) error
 	VolumeDependency(tsr *dbmodel.TenantServiceMountRelation, action string) *util.APIHandleError
 	GetDepVolumes(serviceID string) ([]*dbmodel.TenantServiceMountRelation, *util.APIHandleError)
-	GetVolumes(serviceID string) ([]*dbmodel.TenantServiceVolume, *util.APIHandleError)
+	GetVolumes(serviceID string) ([]*api_model.VolumeWithStatusStruct, *util.APIHandleError)
 	ServiceProbe(tsp *dbmodel.TenantServiceProbe, action string) error
 	RollBack(rs *api_model.RollbackStruct) error
 	GetStatus(serviceID string) (*api_model.StatusList, error)
-	GetServicesStatus(tenantID string, services []string) map[string]string
+	GetServicesStatus(tenantID string, services []string) []map[string]interface{}
+	GetEnterpriseRunningServices(enterpriseID string) []string
 	CreateTenant(*dbmodel.Tenants) error
 	CreateTenandIDAndName(eid string) (string, string, error)
-	GetPods(serviceID string) ([]*K8sPodInfo, error)
-	TransServieToDelete(serviceID string) error
+	GetPods(serviceID string) (*K8sPodInfos, error)
+	TransServieToDelete(tenantID, serviceID string) error
 	TenantServiceDeletePluginRelation(tenantID, serviceID, pluginID string) *util.APIHandleError
 	GetTenantServicePluginRelation(serviceID string) ([]*dbmodel.TenantServicePluginRelation, *util.APIHandleError)
 	SetTenantServicePluginRelation(tenantID, serviceID string, pss *api_model.PluginSetStruct) (*dbmodel.TenantServicePluginRelation, *util.APIHandleError)
@@ -74,4 +73,8 @@ type ServiceHandler interface {
 	GetServiceCheckInfo(uuid string) (*exector.ServiceCheckResult, *util.APIHandleError)
 	GetServiceDeployInfo(tenantID, serviceID string) (*pb.DeployInfo, *util.APIHandleError)
 	ListVersionInfo(serviceID string) (*api_model.BuildListRespVO, error)
+
+	AddAutoscalerRule(req *api_model.AutoscalerRuleReq) error
+	UpdAutoscalerRule(req *api_model.AutoscalerRuleReq) error
+	ListScalingRecords(serviceID string, page, pageSize int) ([]*dbmodel.TenantServiceScalingRecords, int, error)
 }

@@ -34,6 +34,10 @@ import (
 //OneNodeClusterLoadAssignment one envoy node endpoints
 func OneNodeClusterLoadAssignment(serviceAlias, namespace string, endpoints []*corev1.Endpoints, services []*corev1.Service) (clusterLoadAssignment []cache.Resource) {
 	for i := range services {
+		if domain, ok := services[i].Annotations["domain"]; ok && domain != "" {
+			logrus.Warnf("service[sid: %s] endpoint id domain endpoint[domain: %s], use dns cluster type, do not create eds", services[i].GetUID(), domain)
+			continue
+		}
 		service := services[i]
 		destServiceAlias := GetServiceAliasByService(service)
 		if destServiceAlias == "" {
@@ -41,58 +45,65 @@ func OneNodeClusterLoadAssignment(serviceAlias, namespace string, endpoints []*c
 			continue
 		}
 		clusterName := fmt.Sprintf("%s_%s_%s_%d", namespace, serviceAlias, destServiceAlias, service.Spec.Ports[0].Port)
-		name := fmt.Sprintf("%sService", destServiceAlias)
-		if destServiceAlias == serviceAlias {
-			name = fmt.Sprintf("%sServiceOUT", destServiceAlias)
-		}
-		selectEndpoint := getEndpointsByLables(endpoints, map[string]string{"name": name})
-		var lendpoints []endpoint.LocalityLbEndpoints
+		selectEndpoint := getEndpointsByServiceName(endpoints, service.Name)
+		logrus.Debugf("select endpoints %d for service %s", len(selectEndpoint), service.Name)
+		var lendpoints []endpoint.LocalityLbEndpoints // localityLbEndpoints just support only one content
 		for _, en := range selectEndpoint {
+			var notReadyAddress *corev1.EndpointAddress
+			var notReadyPort *corev1.EndpointPort
+			var notreadyToPort int
 			for _, subset := range en.Subsets {
-				if len(subset.Ports) < 1 {
-					continue
-				}
-				toport := int(subset.Ports[0].Port)
-				//if haven multiple port, will get other port endpoint
-				//so must ignore
-				if (len(service.Spec.Ports) == 0 || service.Spec.Ports[0].TargetPort.IntVal != int32(toport)) && en.Labels["service_kind"] != "third_party" {
-					continue
-				}
-				if serviceAlias == destServiceAlias {
-					if originPort, ok := service.Labels["origin_port"]; ok {
-						origin, err := strconv.Atoi(originPort)
-						if err == nil {
-							toport = origin
+				for i, port := range subset.Ports {
+					toport := int(port.Port)
+					if serviceAlias == destServiceAlias {
+						//use real port
+						if originPort, ok := service.Labels["origin_port"]; ok {
+							origin, err := strconv.Atoi(originPort)
+							if err == nil {
+								toport = origin
+							}
+						}
+					}
+					protocol := string(port.Protocol)
+					if len(subset.Addresses) == 0 && len(subset.NotReadyAddresses) > 0 {
+						notReadyAddress = &subset.NotReadyAddresses[0]
+						notreadyToPort = toport
+						notReadyPort = &subset.Ports[i]
+					}
+					getHealty := func() *endpoint.Endpoint_HealthCheckConfig {
+						return &endpoint.Endpoint_HealthCheckConfig{
+							PortValue: uint32(toport),
+						}
+					}
+					if len(subset.Addresses) > 0 {
+						var lbe []endpoint.LbEndpoint
+						for _, address := range subset.Addresses {
+							envoyAddress := envoyv2.CreateSocketAddress(protocol, address.IP, uint32(toport))
+							lbe = append(lbe, endpoint.LbEndpoint{
+								HostIdentifier: &endpoint.LbEndpoint_Endpoint{
+									Endpoint: &endpoint.Endpoint{
+										Address:           &envoyAddress,
+										HealthCheckConfig: getHealty(),
+									},
+								},
+							})
+						}
+						if len(lbe) > 0 {
+							lendpoints = append(lendpoints, endpoint.LocalityLbEndpoints{LbEndpoints: lbe})
 						}
 					}
 				}
-				protocol := string(subset.Ports[0].Protocol)
-				addressList := subset.Addresses
-				var notready bool
-				if len(addressList) == 0 {
-					notready = true
-					addressList = subset.NotReadyAddresses
-				}
-				getHealty := func() *endpoint.Endpoint_HealthCheckConfig {
-					if notready {
-						return nil
-					}
-					return &endpoint.Endpoint_HealthCheckConfig{
-						PortValue: uint32(toport),
-					}
-				}
+			}
+			if len(lendpoints) == 0 && notReadyAddress != nil && notReadyPort != nil {
 				var lbe []endpoint.LbEndpoint
-				for _, address := range addressList {
-					envoyAddress := envoyv2.CreateSocketAddress(protocol, address.IP, uint32(toport))
-					lbe = append(lbe, endpoint.LbEndpoint{
-						HostIdentifier: &endpoint.LbEndpoint_Endpoint{
-							Endpoint: &endpoint.Endpoint{
-								Address:           &envoyAddress,
-								HealthCheckConfig: getHealty(),
-							},
+				envoyAddress := envoyv2.CreateSocketAddress(string(notReadyPort.Protocol), notReadyAddress.IP, uint32(notreadyToPort))
+				lbe = append(lbe, endpoint.LbEndpoint{
+					HostIdentifier: &endpoint.LbEndpoint_Endpoint{
+						Endpoint: &endpoint.Endpoint{
+							Address: &envoyAddress,
 						},
-					})
-				}
+					},
+				})
 				lendpoints = append(lendpoints, endpoint.LocalityLbEndpoints{LbEndpoints: lbe})
 			}
 		}
@@ -122,6 +133,15 @@ func getEndpointsByLables(endpoints []*corev1.Endpoints, slabels map[string]stri
 			}
 		}
 		if existLength == len(slabels) {
+			re = append(re, en)
+		}
+	}
+	return
+}
+
+func getEndpointsByServiceName(endpoints []*corev1.Endpoints, serviceName string) (re []*corev1.Endpoints) {
+	for _, en := range endpoints {
+		if serviceName == en.Name {
 			re = append(re, en)
 		}
 	}

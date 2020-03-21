@@ -24,12 +24,12 @@ import (
 	"testing"
 	"time"
 
+	gomock "github.com/golang/mock/gomock"
 	"github.com/goodrain/rainbond/db"
 	"github.com/goodrain/rainbond/db/dao"
 	"github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/gateway/annotations/parser"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
-	"github.com/rafrombrc/gomock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -163,7 +163,6 @@ func TestApplyTcpRule(t *testing.T) {
 		Comment:         "application info",
 		ContainerCPU:    20,
 		ContainerMemory: 128,
-		ExtendMethod:    "stateless",
 		Replicas:        1,
 		DeployVersion:   "20181022200709",
 		Category:        "application",
@@ -289,7 +288,6 @@ func TestAppServiceBuild_ApplyHttpRule(t *testing.T) {
 		Comment:         "application info",
 		ContainerCPU:    20,
 		ContainerMemory: 128,
-		ExtendMethod:    "stateless",
 		Replicas:        1,
 		DeployVersion:   "20181022200709",
 		Category:        "application",
@@ -329,16 +327,6 @@ func TestAppServiceBuild_ApplyHttpRule(t *testing.T) {
 		Path:          testCase["path"],
 	}
 
-	port := &model.TenantServicesPort{
-		TenantID:       tenant.UUID,
-		ServiceID:      serviceID,
-		ContainerPort:  containerPort,
-		MappingPort:    containerPort,
-		Protocol:       "http",
-		IsInnerService: func() *bool { b := false; return &b }(),
-		IsOuterService: func() *bool { b := true; return &b }(),
-	}
-
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testCase["serviceName"],
@@ -358,7 +346,7 @@ func TestAppServiceBuild_ApplyHttpRule(t *testing.T) {
 		},
 	}
 
-	ing, sec, err := build.applyHTTPRule(httpRule, port, service)
+	ing, sec, err := build.applyHTTPRule(httpRule, containerPort, 0, service)
 	if err != nil {
 		t.Errorf("Unexpected error occurred whiling applying http rule: %v", err)
 	}
@@ -440,7 +428,6 @@ func TestAppServiceBuild_ApplyHttpRuleWithCertificate(t *testing.T) {
 		Comment:         "application info",
 		ContainerCPU:    20,
 		ContainerMemory: 128,
-		ExtendMethod:    "stateless",
 		Replicas:        1,
 		DeployVersion:   "20181022200709",
 		Category:        "application",
@@ -491,16 +478,6 @@ func TestAppServiceBuild_ApplyHttpRuleWithCertificate(t *testing.T) {
 		CertificateID: testCase["certificateID"],
 	}
 
-	port := &model.TenantServicesPort{
-		TenantID:       tenant.UUID,
-		ServiceID:      serviceID,
-		ContainerPort:  containerPort,
-		MappingPort:    containerPort,
-		Protocol:       "http",
-		IsInnerService: func() *bool { b := false; return &b }(),
-		IsOuterService: func() *bool { b := true; return &b }(),
-	}
-
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testCase["serviceName"],
@@ -520,7 +497,7 @@ func TestAppServiceBuild_ApplyHttpRuleWithCertificate(t *testing.T) {
 		},
 	}
 
-	ing, sec, err := build.applyHTTPRule(httpRule, port, service)
+	ing, sec, err := build.applyHTTPRule(httpRule, containerPort, 0, service)
 	if err != nil {
 		t.Errorf("Unexpected error occurred whiling applying http rule: %v", err)
 	}

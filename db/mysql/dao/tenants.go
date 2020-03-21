@@ -25,12 +25,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/goodrain/rainbond/db/dao"
-
 	"github.com/Sirupsen/logrus"
+	"github.com/jinzhu/gorm"
+
+	"github.com/goodrain/rainbond/db/dao"
 	"github.com/goodrain/rainbond/db/errors"
 	"github.com/goodrain/rainbond/db/model"
-	"github.com/jinzhu/gorm"
 )
 
 //TenantDaoImpl 租户信息管理
@@ -88,19 +88,31 @@ func (t *TenantDaoImpl) GetTenantIDByName(name string) (*model.Tenants, error) {
 }
 
 //GetALLTenants GetALLTenants
-func (t *TenantDaoImpl) GetALLTenants() ([]*model.Tenants, error) {
+func (t *TenantDaoImpl) GetALLTenants(query string) ([]*model.Tenants, error) {
 	var tenants []*model.Tenants
-	if err := t.DB.Find(&tenants).Error; err != nil {
-		return nil, err
+	if query != "" {
+		if err := t.DB.Where("name like ?", "%"+query+"%").Find(&tenants).Error; err != nil {
+			return nil, err
+		}
+	} else {
+		if err := t.DB.Find(&tenants).Error; err != nil {
+			return nil, err
+		}
 	}
 	return tenants, nil
 }
 
-//GetTenantsByEid
-func (t *TenantDaoImpl) GetTenantByEid(eid string) ([]*model.Tenants, error) {
+//GetTenantByEid get tenants by eid
+func (t *TenantDaoImpl) GetTenantByEid(eid, query string) ([]*model.Tenants, error) {
 	var tenants []*model.Tenants
-	if err := t.DB.Where("eid = ?", eid).Find(&tenants).Error; err != nil {
-		return nil, err
+	if query != "" {
+		if err := t.DB.Where("eid = ? and name like '%?%'", query).Find(&tenants).Error; err != nil {
+			return nil, err
+		}
+	} else {
+		if err := t.DB.Where("eid = ?", query).Find(&tenants).Error; err != nil {
+			return nil, err
+		}
 	}
 	return tenants, nil
 }
@@ -137,9 +149,8 @@ func (t *TenantDaoImpl) GetTenantLimitsByNames(names []string) (limit map[string
 	return
 }
 
-//GetALLTenants GetALLTenants
+// GetPagedTenants -
 func (t *TenantDaoImpl) GetPagedTenants(offset, len int) ([]*model.Tenants, error) {
-
 	var tenants []*model.Tenants
 	if err := t.DB.Find(&tenants).Group("").Error; err != nil {
 		return nil, err
@@ -147,9 +158,39 @@ func (t *TenantDaoImpl) GetPagedTenants(offset, len int) ([]*model.Tenants, erro
 	return tenants, nil
 }
 
+// DelByTenantID -
+func (t *TenantDaoImpl) DelByTenantID(tenantID string) error {
+	if err := t.DB.Where("uuid=?", tenantID).Delete(&model.Tenants{}).Error; err != nil {
+		return err
+	}
+
+	return nil
+}
+
 //TenantServicesDaoImpl 租户应用dao
 type TenantServicesDaoImpl struct {
 	DB *gorm.DB
+}
+
+// GetServiceTypeById  get service type by service id
+func (t *TenantServicesDaoImpl) GetServiceTypeById(serviceID string) (*model.TenantServices, error) {
+	var service model.TenantServices
+	if err := t.DB.Select("tenant_id, service_id, service_alias, extend_method").Where("service_id=?", serviceID).Find(&service).Error; err != nil {
+		return nil, err
+	}
+	if service.ExtendMethod == "" {
+		// for before V5.2 version
+		logrus.Infof("get low version service[%s] type", serviceID)
+		rows, err := t.DB.Raw("select label_value from tenant_services_label where service_id=? and label_key=?", serviceID, "service-type").Rows()
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			rows.Scan(&service.ExtendMethod)
+		}
+	}
+	return &service, nil
 }
 
 //GetAllServicesID get all service sample info
@@ -161,6 +202,16 @@ func (t *TenantServicesDaoImpl) GetAllServicesID() ([]*model.TenantServices, err
 		}
 		return nil, err
 	}
+	return services, nil
+}
+
+// ListServicesByTenantID -
+func (t *TenantServicesDaoImpl) ListServicesByTenantID(tenantID string) ([]*model.TenantServices, error) {
+	var services []*model.TenantServices
+	if err := t.DB.Where("tenant_id=?", tenantID).Find(&services).Error; err != nil {
+		return nil, err
+	}
+
 	return services, nil
 }
 
@@ -204,7 +255,7 @@ func (t *TenantServicesDaoImpl) GetServiceByID(serviceID string) (*model.TenantS
 	return &service, nil
 }
 
-//GetServiceByID 获取服务通过服务别名
+//GetServiceByServiceAlias 获取服务通过服务别名
 func (t *TenantServicesDaoImpl) GetServiceByServiceAlias(serviceAlias string) (*model.TenantServices, error) {
 	var service model.TenantServices
 	if err := t.DB.Where("service_alias=?", serviceAlias).Find(&service).Error; err != nil {
@@ -429,7 +480,7 @@ func (t *TenantServicesDaoImpl) DeleteServiceByServiceID(serviceID string) error
 	return nil
 }
 
-// ListThirdPartyService lists all third party services
+// ListThirdPartyServices lists all third party services
 func (t *TenantServicesDaoImpl) ListThirdPartyServices() ([]*model.TenantServices, error) {
 	var res []*model.TenantServices
 	if err := t.DB.Where("kind=?", model.ServiceKindThirdParty.String()).Find(&res).Error; err != nil {
@@ -464,6 +515,7 @@ func (t *TenantServicesDeleteImpl) UpdateModel(mo model.Interface) error {
 	return nil
 }
 
+// GetTenantServicesDeleteByCreateTime -
 func (t *TenantServicesDeleteImpl) GetTenantServicesDeleteByCreateTime(createTime time.Time) ([]*model.TenantServicesDelete, error) {
 	var ServiceDel []*model.TenantServicesDelete
 	if err := t.DB.Where("create_time < ?", createTime).Find(&ServiceDel).Error; err != nil {
@@ -475,6 +527,7 @@ func (t *TenantServicesDeleteImpl) GetTenantServicesDeleteByCreateTime(createTim
 	return ServiceDel, nil
 }
 
+// DeleteTenantServicesDelete -
 func (t *TenantServicesDeleteImpl) DeleteTenantServicesDelete(record *model.TenantServicesDelete) error {
 	if err := t.DB.Delete(record).Error; err != nil {
 		return err
@@ -572,7 +625,7 @@ func (t *TenantServicesPortDaoImpl) GetPort(serviceID string, port int) (*model.
 	return &oldPort, nil
 }
 
-// GetEnablePort returns opened ports.
+// GetOpenedPorts returns opened ports.
 func (t *TenantServicesPortDaoImpl) GetOpenedPorts(serviceID string) ([]*model.TenantServicesPort, error) {
 	var ports []*model.TenantServicesPort
 	if err := t.DB.Where("service_id = ? and (is_inner_service=1 or is_outer_service=1)", serviceID).
@@ -618,6 +671,16 @@ func (t *TenantServicesPortDaoImpl) GetDepUDPPort(serviceID string) ([]*model.Te
 // DelByServiceID deletes TenantServicesPort matching sid(service_id).
 func (t *TenantServicesPortDaoImpl) DelByServiceID(sid string) error {
 	return t.DB.Where("service_id=?", sid).Delete(&model.TenantServicesPort{}).Error
+}
+
+// ListInnerPortsByServiceIDs -
+func (t *TenantServicesPortDaoImpl) ListInnerPortsByServiceIDs(serviceIDs []string) ([]*model.TenantServicesPort, error) {
+	var ports []*model.TenantServicesPort
+	if err := t.DB.Where("service_id in (?) and is_inner_service=?", serviceIDs, true).Find(&ports).Error; err != nil {
+		return nil, err
+	}
+
+	return ports, nil
 }
 
 //TenantServiceRelationDaoImpl TenantServiceRelationDaoImpl
@@ -687,6 +750,16 @@ func (t *TenantServiceRelationDaoImpl) GetTenantServiceRelations(serviceID strin
 		return nil, err
 	}
 	return oldRelation, nil
+}
+
+// ListByServiceIDs -
+func (t *TenantServiceRelationDaoImpl) ListByServiceIDs(serviceIDs []string) ([]*model.TenantServiceRelation, error) {
+	var relations []*model.TenantServiceRelation
+	if err := t.DB.Where("service_id in (?)", serviceIDs).Find(&relations).Error; err != nil {
+		return nil, err
+	}
+
+	return relations, nil
 }
 
 //HaveRelations 是否有依赖
@@ -1270,22 +1343,12 @@ type ServiceLabelDaoImpl struct {
 func (t *ServiceLabelDaoImpl) AddModel(mo model.Interface) error {
 	label := mo.(*model.TenantServiceLable)
 	var oldLabel model.TenantServiceLable
-	if label.LabelKey == model.LabelKeyServiceType { //LabelKeyServiceType 只能有一条
-		if ok := t.DB.Where("service_id = ? and label_key=?", label.ServiceID, label.LabelKey).Find(&oldLabel).RecordNotFound(); ok {
-			if err := t.DB.Create(label).Error; err != nil {
-				return err
-			}
-		} else {
-			return fmt.Errorf("label key %s of service %s is exist", label.LabelKey, label.ServiceID)
+	if ok := t.DB.Where("service_id = ? and label_key=? and label_value=?", label.ServiceID, label.LabelKey, label.LabelValue).Find(&oldLabel).RecordNotFound(); ok {
+		if err := t.DB.Create(label).Error; err != nil {
+			return err
 		}
 	} else {
-		if ok := t.DB.Where("service_id = ? and label_key=? and label_value=?", label.ServiceID, label.LabelKey, label.LabelValue).Find(&oldLabel).RecordNotFound(); ok {
-			if err := t.DB.Create(label).Error; err != nil {
-				return err
-			}
-		} else {
-			return fmt.Errorf("label key %s value %s of service %s is exist", label.LabelKey, label.LabelValue, label.ServiceID)
-		}
+		return fmt.Errorf("label key %s value %s of service %s is exist", label.LabelKey, label.LabelValue, label.ServiceID)
 	}
 	return nil
 }
@@ -1387,19 +1450,23 @@ func (t *ServiceLabelDaoImpl) GetTenantServiceAffinityLabel(serviceID string) ([
 	return labels, nil
 }
 
+// no usages func. get tenant service type use TenantServiceDao.GetServiceTypeById(serviceID string)
 //GetTenantServiceTypeLabel GetTenantServiceTypeLabel
 func (t *ServiceLabelDaoImpl) GetTenantServiceTypeLabel(serviceID string) (*model.TenantServiceLable, error) {
 	var label model.TenantServiceLable
-	if err := t.DB.Where("service_id=? and label_key=?", serviceID, model.LabelKeyServiceType).Find(&label).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
+	return &label, nil
+}
+
+// GetPrivilegedLabel -
+func (t *ServiceLabelDaoImpl) GetPrivilegedLabel(serviceID string) (*model.TenantServiceLable, error) {
+	var label model.TenantServiceLable
+	if err := t.DB.Where("service_id=? and label_value=?", serviceID, model.LabelKeyServicePrivileged).Find(&label).Error; err != nil {
 		return nil, err
 	}
 	return &label, nil
 }
 
-//DELTenantServiceLabelsByLabelvaluesAndServiceID DELTenantServiceLabelsByLabelvaluesAndServiceID
+//DelTenantServiceLabelsByLabelValuesAndServiceID DELTenantServiceLabelsByLabelvaluesAndServiceID
 func (t *ServiceLabelDaoImpl) DelTenantServiceLabelsByLabelValuesAndServiceID(serviceID string) error {
 	var label model.TenantServiceLable
 	if err := t.DB.Where("service_id=? and label_value=?", serviceID, model.LabelKeyNodeSelector).Delete(&label).Error; err != nil {
@@ -1408,7 +1475,7 @@ func (t *ServiceLabelDaoImpl) DelTenantServiceLabelsByLabelValuesAndServiceID(se
 	return nil
 }
 
-//DelTenantServiceLabels deletes labels
+//DelTenantServiceLabelsByServiceIDKeyValue deletes labels
 func (t *ServiceLabelDaoImpl) DelTenantServiceLabelsByServiceIDKeyValue(serviceID string, labelKey string,
 	labelValue string) error {
 	var label model.TenantServiceLable
@@ -1426,4 +1493,184 @@ func (t *ServiceLabelDaoImpl) DelTenantServiceLabelsByServiceIDKey(serviceID str
 		return err
 	}
 	return nil
+}
+
+// TenantServceAutoscalerRulesDaoImpl -
+type TenantServceAutoscalerRulesDaoImpl struct {
+	DB *gorm.DB
+}
+
+// AddModel -
+func (t *TenantServceAutoscalerRulesDaoImpl) AddModel(mo model.Interface) error {
+	rule := mo.(*model.TenantServiceAutoscalerRules)
+	var old model.TenantServiceAutoscalerRules
+	if ok := t.DB.Where("rule_id = ?", rule.RuleID).Find(&old).RecordNotFound(); ok {
+		if err := t.DB.Create(rule).Error; err != nil {
+			return err
+		}
+	} else {
+		return errors.ErrRecordAlreadyExist
+	}
+	return nil
+}
+
+// UpdateModel -
+func (t *TenantServceAutoscalerRulesDaoImpl) UpdateModel(mo model.Interface) error {
+	rule := mo.(*model.TenantServiceAutoscalerRules)
+	if err := t.DB.Save(rule).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetByRuleID -
+func (t *TenantServceAutoscalerRulesDaoImpl) GetByRuleID(ruleID string) (*model.TenantServiceAutoscalerRules, error) {
+	var rule model.TenantServiceAutoscalerRules
+	if err := t.DB.Where("rule_id=?", ruleID).Find(&rule).Error; err != nil {
+		return nil, err
+	}
+	return &rule, nil
+}
+
+// ListByServiceID -
+func (t *TenantServceAutoscalerRulesDaoImpl) ListByServiceID(serviceID string) ([]*model.TenantServiceAutoscalerRules, error) {
+	var rules []*model.TenantServiceAutoscalerRules
+	if err := t.DB.Where("service_id=?", serviceID).Find(&rules).Error; err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// ListEnableOnesByServiceID -
+func (t *TenantServceAutoscalerRulesDaoImpl) ListEnableOnesByServiceID(serviceID string) ([]*model.TenantServiceAutoscalerRules, error) {
+	var rules []*model.TenantServiceAutoscalerRules
+	if err := t.DB.Where("service_id=? and enable=?", serviceID, true).Find(&rules).Error; err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// TenantServceAutoscalerRuleMetricsDaoImpl -
+type TenantServceAutoscalerRuleMetricsDaoImpl struct {
+	DB *gorm.DB
+}
+
+// AddModel -
+func (t *TenantServceAutoscalerRuleMetricsDaoImpl) AddModel(mo model.Interface) error {
+	metric := mo.(*model.TenantServiceAutoscalerRuleMetrics)
+	var old model.TenantServiceAutoscalerRuleMetrics
+	if ok := t.DB.Where("rule_id=? and metric_type=? and metric_name=?", metric.RuleID, metric.MetricsType, metric.MetricsName).Find(&old).RecordNotFound(); ok {
+		if err := t.DB.Create(metric).Error; err != nil {
+			return err
+		}
+	} else {
+		return errors.ErrRecordAlreadyExist
+	}
+	return nil
+}
+
+// UpdateModel -
+func (t *TenantServceAutoscalerRuleMetricsDaoImpl) UpdateModel(mo model.Interface) error {
+	metric := mo.(*model.TenantServiceAutoscalerRuleMetrics)
+	if err := t.DB.Save(metric).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+// UpdateOrCreate -
+func (t *TenantServceAutoscalerRuleMetricsDaoImpl) UpdateOrCreate(metric *model.TenantServiceAutoscalerRuleMetrics) error {
+	var old model.TenantServiceAutoscalerRuleMetrics
+	if ok := t.DB.Where("rule_id=? and metric_type=? and metric_name=?", metric.RuleID, metric.MetricsType, metric.MetricsName).Find(&old).RecordNotFound(); ok {
+		if err := t.DB.Create(metric).Error; err != nil {
+			return err
+		}
+	} else {
+		old.MetricTargetType = metric.MetricTargetType
+		old.MetricTargetValue = metric.MetricTargetValue
+		if err := t.DB.Save(&old).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListByRuleID -
+func (t *TenantServceAutoscalerRuleMetricsDaoImpl) ListByRuleID(ruleID string) ([]*model.TenantServiceAutoscalerRuleMetrics, error) {
+	var metrics []*model.TenantServiceAutoscalerRuleMetrics
+	if err := t.DB.Where("rule_id=?", ruleID).Find(&metrics).Error; err != nil {
+		return nil, err
+	}
+	return metrics, nil
+}
+
+// DeleteByRuleID -
+func (t *TenantServceAutoscalerRuleMetricsDaoImpl) DeleteByRuleID(ruldID string) error {
+	if err := t.DB.Where("rule_id=?", ruldID).Delete(&model.TenantServiceAutoscalerRuleMetrics{}).Error; err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// TenantServiceScalingRecordsDaoImpl -
+type TenantServiceScalingRecordsDaoImpl struct {
+	DB *gorm.DB
+}
+
+// AddModel -
+func (t *TenantServiceScalingRecordsDaoImpl) AddModel(mo model.Interface) error {
+	record := mo.(*model.TenantServiceScalingRecords)
+	var old model.TenantServiceScalingRecords
+	if ok := t.DB.Where("event_name=?", record.EventName).Find(&old).RecordNotFound(); ok {
+		if err := t.DB.Create(record).Error; err != nil {
+			return err
+		}
+	} else {
+		return errors.ErrRecordAlreadyExist
+	}
+	return nil
+}
+
+// UpdateModel -
+func (t *TenantServiceScalingRecordsDaoImpl) UpdateModel(mo model.Interface) error {
+	record := mo.(*model.TenantServiceScalingRecords)
+	if err := t.DB.Save(record).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+// UpdateOrCreate -
+func (t *TenantServiceScalingRecordsDaoImpl) UpdateOrCreate(new *model.TenantServiceScalingRecords) error {
+	var old model.TenantServiceScalingRecords
+
+	if ok := t.DB.Where("event_name=?", new.EventName).Find(&old).RecordNotFound(); ok {
+		return t.DB.Create(new).Error
+	}
+
+	old.Count = new.Count
+	old.LastTime = new.LastTime
+	return t.DB.Save(&old).Error
+}
+
+// ListByServiceID -
+func (t *TenantServiceScalingRecordsDaoImpl) ListByServiceID(serviceID string, offset, limit int) ([]*model.TenantServiceScalingRecords, error) {
+	var records []*model.TenantServiceScalingRecords
+	if err := t.DB.Where("service_id=?", serviceID).Offset(offset).Limit(limit).Order("last_time desc").Find(&records).Error; err != nil {
+		return nil, err
+	}
+
+	return records, nil
+}
+
+// CountByServiceID -
+func (t *TenantServiceScalingRecordsDaoImpl) CountByServiceID(serviceID string) (int, error) {
+	record := model.TenantServiceScalingRecords{}
+	var count int
+	if err := t.DB.Table(record.TableName()).Where("service_id=?", serviceID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }

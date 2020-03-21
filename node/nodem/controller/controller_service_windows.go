@@ -90,7 +90,7 @@ func (w *windowsServiceController) StopList(list []*service.Service) error {
 func (w *windowsServiceController) RestartService(s *service.Service) error {
 	if err := windows.RestartService(s.Name); err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
-			if err := w.WriteConfig(s); err != nil {
+			if _, err := w.WriteConfig(s); err != nil {
 				return fmt.Errorf("ReWrite service config failure %s", err.Error())
 			}
 		}
@@ -100,8 +100,8 @@ func (w *windowsServiceController) RestartService(s *service.Service) error {
 	logrus.Infof("windows service controller restart service %s success", s.Name)
 	return nil
 }
-func (w *windowsServiceController) WriteConfig(s *service.Service) error {
-	return w.writeConfig(s, true)
+func (w *windowsServiceController) WriteConfig(s *service.Service) (bool, error) {
+	return true, w.writeConfig(s, true)
 }
 func (w *windowsServiceController) writeConfig(s *service.Service, parseAndCoverOld bool) error {
 	cmdstr := s.Start

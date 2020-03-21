@@ -1,55 +1,58 @@
-{{ $http_port := .Set.ListenPorts.HTTP }}
-{{ range $srv := .Servers }}
+{{ range $server:=.Servers }}
 server {
-    {{ if $srv.Listen }}listen    {{$srv.Listen}};{{ end }}
-    {{ if $srv.Root }}root    {{$srv.Root}};{{ end }}
-    {{ if $srv.ServerName }}server_name    {{$srv.ServerName}};{{end}}
-	{{ if $srv.DefaultType }}default_type    {{$srv.DefaultType}};{{end}}
-    {{ if $srv.Charset }}charset   {{$srv.Charset}};{{end}}
-
-    {{ if gt $srv.KeepaliveTimeout.Num 0 }}
-    keepalive_timeout {{$srv.KeepaliveTimeout.Num}}{{$srv.KeepaliveTimeout.Unit}};
+    {{ if .Listen }}listen    {{.Listen}};{{ end }}
+    {{ if .Root }}root    {{.Root}};{{ end }}
+    {{ if .ServerName }}server_name    {{.ServerName}};{{end}}
+	{{ if .DefaultType }}default_type    {{.DefaultType}};{{end}}
+    {{ if .Charset }}charset   {{.Charset}};{{end}}
+    access_log off;
+    {{ if gt .KeepaliveTimeout.Num 0 }}
+    keepalive_timeout {{.KeepaliveTimeout.Num}}{{.KeepaliveTimeout.Unit}};
     {{ end }}
 
-    {{ if $srv.ServerTokens }}server_tokens on;{{ end }}
+    {{ if .ServerTokens }}server_tokens on;{{ end }}
 
-    {{ if $srv.SSLCertificate }}
+    {{ if .SSLCertificate }}
     # ssl
-    ssl_certificate {{$srv.SSLCertificate}};
+    ssl_certificate {{.SSLCertificate}};
     {{ end }}
-    {{ if $srv.SSLCertificateKey }}ssl_certificate_key {{$srv.SSLCertificateKey}};{{ end }}
+    {{ if .SSLCertificateKey }}ssl_certificate_key {{.SSLCertificateKey}};{{ end }}
 
-    {{ if $srv.ClientMaxBodySize.Unit }}
-    client_max_body_size {{$srv.ClientMaxBodySize.Num}}{{$srv.ClientMaxBodySize.Unit}};
+    {{ if .ClientMaxBodySize.Unit }}
+    client_max_body_size {{.ClientMaxBodySize.Num}}{{.ClientMaxBodySize.Unit}};
     {{ end }}
-    {{ if $srv.ChunkedTransferEncoding }}
+    {{ if .ChunkedTransferEncoding }}
     chunked_transfer_encoding on;
     {{ end }}
 
-    {{ range $rewrite := $srv.Rewrites }}
+    {{ range $rewrite := .Rewrites }}
     rewrite {{$rewrite.Regex}} {{$rewrite.Replacement}}{{if $rewrite.Flag }} {{$rewrite.Flag}}{{ end }};
     {{ end }}
 
-    {{ if ne $srv.Return.Code 0 }}
-    return {{ $srv.Return.Code }} {{ if $srv.Return.Text}} "{{ $srv.Return.Text }}" {{ else if $srv.Return.URL }} {{$srv.Return.URL}} {{ end }};
+    {{ if ne .Return.Code 0 }}
+    return {{ .Return.Code }} {{ if .Return.Text}} "{{ .Return.Text }}" {{ else if .Return.URL }} {{.Return.URL}} {{ end }};
     {{ end }}
 
-    {{ if gt $srv.ProxyConnectTimeout.Num 0 }}
-    proxy_connect_timeout   {{$srv.ProxyConnectTimeout.Num}}{{$srv.ProxyConnectTimeout.Unit}};
+    {{ if gt .ProxyConnectTimeout.Num 0 }}
+    proxy_connect_timeout   {{.ProxyConnectTimeout.Num}}{{.ProxyConnectTimeout.Unit}};
     {{ end }}
-    {{ if gt $srv.ProxyTimeout.Num 0 }}
-    proxy_timeout   {{$srv.ProxyTimeout.Num}}{{$srv.ProxyTimeout.Unit}};
+    {{ if gt .ProxyTimeout.Num 0 }}
+    proxy_timeout   {{.ProxyTimeout.Num}}{{.ProxyTimeout.Unit}};
     {{ end }}
-    {{ if $srv.ProxyPass }}
-    proxy_pass {{$srv.ProxyPass}};
+    {{ if .ProxyPass }}
+    proxy_pass {{.ProxyPass}};
     {{ end }}
 
-    {{ range $loc := $srv.Locations }}
+    {{ range $loc := .Locations }}
     location {{$loc.Path}} {
         {{ range $rewrite := $loc.Rewrite.Rewrites }}
         rewrite {{$rewrite.Regex}} {{$rewrite.Replacement}}{{if $rewrite.Flag }} {{$rewrite.Flag}}{{ end }};
         {{ end }}
-
+        set $pass_access_scheme  $scheme;
+        set $best_http_host $http_host;
+        set $pass_port $server_port;
+        
+        # custom proxy_set_header
         {{ range $k, $v := $loc.Proxy.SetHeaders }}
         proxy_set_header    {{$k}}    {{$v}};
         {{ end }}
@@ -71,6 +74,8 @@ server {
 
         {{ if $loc.DisableAccessLog }}
         access_log off;
+        {{ else if $loc.AccessLogPath }}
+        access_log $loc.AccessLogPath porxy;
         {{ end }}
         
         {{ if $loc.ProxyRedirect }}
@@ -78,8 +83,8 @@ server {
         {{ end }}
         {{ if not $loc.DisableProxyPass }}
             set $target 'default';
-            {{ if $srv.OptionValue }}
-                {{range $i, $v := $srv.OptionValue}}
+            {{ if $server.OptionValue }}
+                {{range $i, $v := $server.OptionValue}}
                     set ${{$i}} '{{$v}}';
                 {{end}}
             {{ end }}

@@ -21,10 +21,11 @@ package conversion
 import (
 	"fmt"
 	"os"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/jinzhu/gorm"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/builder"
@@ -34,8 +35,8 @@ import (
 	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/util"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
+	"github.com/goodrain/rainbond/worker/appm/volume"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -98,12 +99,16 @@ func TenantServiceVersion(as *v1.AppService, dbmanager db.Manager) error {
 			}(),
 		},
 	}
+	var terminationGracePeriodSeconds int64 = 10
+	if as.GetDeployment() != nil {
+		podtmpSpec.Spec.TerminationGracePeriodSeconds = &terminationGracePeriodSeconds
+	}
 	//set to deployment or statefulset
 	as.SetPodTemplate(podtmpSpec)
 	return nil
 }
 
-func getMainContainer(as *v1.AppService, version *dbmodel.VersionInfo, dv *volumeDefine, dbmanager db.Manager) (*corev1.Container, error) {
+func getMainContainer(as *v1.AppService, version *dbmodel.VersionInfo, dv *volume.Define, dbmanager db.Manager) (*corev1.Container, error) {
 	envs, err := createEnv(as, dbmanager)
 	if err != nil {
 		return nil, fmt.Errorf("conv service envs failure %s", err.Error())
@@ -119,7 +124,8 @@ func getMainContainer(as *v1.AppService, version *dbmodel.VersionInfo, dv *volum
 			imagename = version.DeliveredPath
 		}
 	}
-	return &corev1.Container{
+
+	c := &corev1.Container{
 		Name:           as.ServiceID,
 		Image:          imagename,
 		Args:           args,
@@ -129,16 +135,18 @@ func getMainContainer(as *v1.AppService, version *dbmodel.VersionInfo, dv *volum
 		LivenessProbe:  createProbe(as, dbmanager, "liveness"),
 		ReadinessProbe: createProbe(as, dbmanager, "readiness"),
 		Resources:      resources,
-	}, nil
-}
-
-func getenv(key string, envs []corev1.EnvVar) string {
-	for _, env := range envs {
-		if env.Name == key {
-			return env.Value
-		}
 	}
-	return ""
+
+	label, err := dbmanager.TenantServiceLabelDao().GetPrivilegedLabel(as.ServiceID)
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, fmt.Errorf("get privileged label: %v", err)
+	}
+	if label != nil {
+		logrus.Infof("service id: %s; enable privileged.", as.ServiceID)
+		c.SecurityContext = &corev1.SecurityContext{Privileged: util.Bool(true)}
+	}
+
+	return c, nil
 }
 
 func createArgs(version *dbmodel.VersionInfo, envs []corev1.EnvVar) (args []string) {
@@ -165,7 +173,6 @@ func createEnv(as *v1.AppService, dbmanager db.Manager) (*[]corev1.EnvVar, error
 		Name:  "LOGGER_DRIVER_NAME",
 		Value: "streamlog",
 	})
-
 	//set relation app outer env
 	relations, err := dbmanager.TenantServiceRelationDao().GetTenantServiceRelations(as.ServiceID)
 	if err != nil {
@@ -178,30 +185,35 @@ func createEnv(as *v1.AppService, dbmanager db.Manager) (*[]corev1.EnvVar, error
 		}
 		//set service all dependces ids
 		as.Dependces = relationIDs
-		if len(relationIDs) > 0 {
-			es, err := dbmanager.TenantServiceEnvVarDao().GetDependServiceEnvs(relationIDs, []string{"outer", "both"})
-			if err != nil {
-				return nil, err
-			}
-			if es != nil {
-				envsAll = append(envsAll, es...)
-			}
-			serviceAliass, err := dbmanager.TenantServiceDao().GetServiceAliasByIDs(relationIDs)
-			if err != nil {
-				return nil, err
-			}
-			var Depend string
-			for _, sa := range serviceAliass {
-				if Depend != "" {
-					Depend += ","
-				}
-				Depend += fmt.Sprintf("%s:%s", sa.ServiceAlias, sa.ServiceID)
-			}
-			envs = append(envs, corev1.EnvVar{Name: "DEPEND_SERVICE", Value: Depend})
-			envs = append(envs, corev1.EnvVar{Name: "DEPEND_SERVICE_COUNT", Value: strconv.Itoa(len(serviceAliass))})
-			as.NeedProxy = true
+		es, err := dbmanager.TenantServiceEnvVarDao().GetDependServiceEnvs(relationIDs, []string{"outer", "both"})
+		if err != nil {
+			return nil, err
 		}
+		if es != nil {
+			envsAll = append(envsAll, es...)
+		}
+
+		serviceAliass, err := dbmanager.TenantServiceDao().GetServiceAliasByIDs(relationIDs)
+		if err != nil {
+			return nil, err
+		}
+		var Depend string
+		for _, sa := range serviceAliass {
+			if Depend != "" {
+				Depend += ","
+			}
+			Depend += fmt.Sprintf("%s:%s", sa.ServiceAlias, sa.ServiceID)
+		}
+		envs = append(envs, corev1.EnvVar{Name: "DEPEND_SERVICE", Value: Depend})
+		envs = append(envs, corev1.EnvVar{Name: "DEPEND_SERVICE_COUNT", Value: strconv.Itoa(len(serviceAliass))})
+
+		sid2alias := make(map[string]string, len(serviceAliass))
+		for _, alias := range serviceAliass {
+			sid2alias[alias.ServiceID] = alias.ServiceAlias
+		}
+		as.NeedProxy = true
 	}
+
 	//set app relation env
 	relations, err = dbmanager.TenantServiceRelationDao().GetTenantServiceRelationsByDependServiceID(as.ServiceID)
 	if err != nil {
@@ -227,6 +239,7 @@ func createEnv(as *v1.AppService, dbmanager db.Manager) (*[]corev1.EnvVar, error
 			envs = append(envs, corev1.EnvVar{Name: "REVERSE_DEPEND_SERVICE", Value: Depend})
 		}
 	}
+
 	//set app port and net env
 	ports, err := dbmanager.TenantServicesPortDao().GetPortsByServiceID(as.ServiceID)
 	if err != nil {
@@ -266,16 +279,11 @@ func createEnv(as *v1.AppService, dbmanager db.Manager) (*[]corev1.EnvVar, error
 			as.ExtensionSet[strings.ToLower(e.AttrName[3:])] = e.AttrValue
 		}
 	}
-	svc, err := dbmanager.TenantServiceDao().GetServiceByID(as.ServiceID)
-	if err != nil {
-		return nil, err
-	}
 	//set default env
 	envs = append(envs, corev1.EnvVar{Name: "TENANT_ID", Value: as.TenantID})
 	envs = append(envs, corev1.EnvVar{Name: "SERVICE_ID", Value: as.ServiceID})
 	envs = append(envs, corev1.EnvVar{Name: "MEMORY_SIZE", Value: getMemoryType(as.ContainerMemory)})
 	envs = append(envs, corev1.EnvVar{Name: "SERVICE_NAME", Value: as.ServiceAlias})
-	envs = append(envs, corev1.EnvVar{Name: "SERVICE_EXTEND_METHOD", Value: svc.ExtendMethod})
 	envs = append(envs, corev1.EnvVar{Name: "SERVICE_POD_NUM", Value: strconv.Itoa(as.Replicas)})
 	envs = append(envs, corev1.EnvVar{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{
@@ -399,10 +407,8 @@ var memoryLabels = map[int]string{
 	65536: "64xlarge",
 }
 
-func createVolumes(as *v1.AppService, version *dbmodel.VersionInfo, dbmanager db.Manager) (*volumeDefine, error) {
-	var vd = &volumeDefine{
-		as: as,
-	}
+func createVolumes(as *v1.AppService, version *dbmodel.VersionInfo, dbmanager db.Manager) (*volume.Define, error) {
+	var define = &volume.Define{}
 	vs, err := dbmanager.TenantServiceVolumeDao().GetTenantServiceVolumesByServiceID(version.ServiceID)
 	if err != nil {
 		return nil, err
@@ -420,306 +426,45 @@ func createVolumes(as *v1.AppService, version *dbmodel.VersionInfo, dbmanager db
 	}
 
 	if vs != nil && len(vs) > 0 {
-		for i := range vs {
-			v := vs[i]
-			if v.VolumeType == dbmodel.ShareFileVolumeType.String() {
-				err := util.CheckAndCreateDir(v.HostPath)
-				if err != nil {
-					return nil, fmt.Errorf("create host path %s error,%s", v.HostPath, err.Error())
+		for _, v := range vs {
+			vol := volume.NewVolumeManager(as, v, nil, version, dbmanager)
+			if vol != nil {
+				if err = vol.CreateVolume(define); err != nil {
+					logrus.Warningf("service: %s, create volume: %s, error: %+v \n skip it", version.ServiceID, v.VolumeName, err.Error())
+					continue
 				}
-				os.Chmod(v.HostPath, 0777)
-			}
-			// create a configMap which will be mounted as a volume
-			var cmap *corev1.ConfigMap
-			if v.VolumeType == dbmodel.ConfigFileVolumeType.String() {
-				cf, err := dbmanager.TenantServiceConfigFileDao().GetByVolumeName(as.ServiceID, v.VolumeName)
-				if err != nil {
-					logrus.Errorf("error getting config file by volume name(%s): %v", v.VolumeName, err)
-					return nil, fmt.Errorf("error getting config file by volume name(%s): %v", v.VolumeName, err)
-				}
-				cmap = &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      util.NewUUID(),
-						Namespace: as.TenantID,
-						Labels:    as.GetCommonLabels(),
-					},
-					Data: make(map[string]string),
-				}
-				cmap.Data[path.Base(v.VolumePath)] = util.ParseVariable(cf.FileContent, configs)
-				as.SetConfigMap(cmap)
-				vd.SetVolumeCMap(cmap, path.Base(v.VolumePath), v.VolumePath, false)
-				continue // pass codes below
-			}
-			if as.GetStatefulSet() != nil {
-				vd.SetPV(dbmodel.VolumeType(v.VolumeType), fmt.Sprintf("manual%d", v.ID), v.VolumeName, v.VolumePath, v.IsReadOnly)
-			} else {
-				hostPath := v.HostPath
-				if as.IsWindowsService {
-					hostPath = RewriteHostPathInWindows(hostPath)
-				}
-				vd.SetVolume(dbmodel.VolumeType(v.VolumeType), fmt.Sprintf("manual%d", v.ID), v.VolumePath, hostPath, corev1.HostPathDirectoryOrCreate, v.IsReadOnly)
 			}
 		}
 	}
+
 	//handle Shared storage
 	tsmr, err := dbmanager.TenantServiceMountRelationDao().GetTenantServiceMountRelationsByService(version.ServiceID)
 	if err != nil {
 		return nil, err
 	}
+
 	if vs != nil && len(tsmr) > 0 {
-		for i := range tsmr {
-			t := tsmr[i]
-			switch t.VolumeType {
-			case dbmodel.ShareFileVolumeType.String():
-				err := util.CheckAndCreateDir(t.HostPath)
-				if err != nil {
-					return nil, fmt.Errorf("create host path %s error,%s", t.HostPath, err.Error())
+		for _, t := range tsmr {
+			vol := volume.NewVolumeManager(as, nil, t, version, dbmanager)
+			if vol != nil {
+				if err = vol.CreateDependVolume(define); err != nil {
+					logrus.Warningf("service: %s, create volume: %s, error: %+v \n skip it", version.ServiceID, t.VolumeName, err.Error())
+					continue
 				}
-				hostPath := t.HostPath
-				if as.IsWindowsService {
-					hostPath = RewriteHostPathInWindows(hostPath)
-				}
-				vd.SetVolume(dbmodel.ShareFileVolumeType, fmt.Sprintf("mnt%d", t.ID), t.VolumePath, hostPath, corev1.HostPathDirectoryOrCreate, false)
-			case dbmodel.ConfigFileVolumeType.String():
-				_, err := dbmanager.TenantServiceVolumeDao().GetVolumeByServiceIDAndName(t.DependServiceID, t.VolumeName)
-				if err != nil {
-					return nil, fmt.Errorf("error getting TenantServiceVolume according to serviceID(%s) and volumeName(%s): %v",
-						t.DependServiceID, t.VolumeName, err)
-				}
-				cf, err := dbmanager.TenantServiceConfigFileDao().GetByVolumeName(t.DependServiceID, t.VolumeName)
-				if err != nil {
-					return nil, fmt.Errorf("error getting TenantServiceConfigFile according to volumeName(%s): %v", t.VolumeName, err)
-				}
-
-				cmap := &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      util.NewUUID(),
-						Namespace: as.TenantID,
-						Labels:    as.GetCommonLabels(),
-					},
-					Data: make(map[string]string),
-				}
-				cmap.Data[path.Base(t.VolumePath)] = util.ParseVariable(cf.FileContent, configs)
-				as.SetConfigMap(cmap)
-
-				vd.SetVolumeCMap(cmap, path.Base(t.VolumePath), t.VolumePath, false)
 			}
 		}
 	}
+
 	//handle slug file volume
 	if version.DeliveredType == "slug" {
 		//slug host path already is windows style
-		vd.SetVolume(dbmodel.ShareFileVolumeType, "slug", "/tmp/slug/slug.tgz", version.DeliveredPath, corev1.HostPathFile, true)
+		define.SetVolume(dbmodel.ShareFileVolumeType, "slug", "/tmp/slug/slug.tgz", version.DeliveredPath, corev1.HostPathFile, true)
 	}
-	return vd, nil
-}
-
-//RewriteHostPathInWindows rewrite host path
-func RewriteHostPathInWindows(hostPath string) string {
-	localPath := os.Getenv("LOCAL_DATA_PATH")
-	sharePath := os.Getenv("SHARE_DATA_PATH")
-	if localPath == "" {
-		localPath = "/grlocaldata"
-	}
-	if sharePath == "" {
-		sharePath = "/grdata"
-	}
-	hostPath = strings.Replace(hostPath, "/grdata", `z:`, 1)
-	hostPath = strings.Replace(hostPath, "/", `\`, -1)
-	return hostPath
-}
-
-//RewriteContainerPathInWindows mount path in windows
-func RewriteContainerPathInWindows(mountPath string) string {
-	if mountPath == "" {
-		return ""
-	}
-	if mountPath[0] == '/' {
-		mountPath = `c:\` + mountPath[1:]
-	}
-	mountPath = strings.Replace(mountPath, "/", `\`, -1)
-	return mountPath
-}
-
-type volumeDefine struct {
-	as           *v1.AppService
-	volumeMounts []corev1.VolumeMount
-	volumes      []corev1.Volume
-}
-
-func (v *volumeDefine) GetVolumes() []corev1.Volume {
-	return v.volumes
-}
-
-func (v *volumeDefine) GetVolumeMounts() []corev1.VolumeMount {
-	return v.volumeMounts
-}
-
-func (v *volumeDefine) SetPV(VolumeType dbmodel.VolumeType, name, volumeName, mountPath string, readOnly bool) {
-	switch VolumeType {
-	case dbmodel.ShareFileVolumeType:
-		if statefulset := v.as.GetStatefulSet(); statefulset != nil {
-			//do not limit
-			resourceStorage, _ := resource.ParseQuantity("500Gi")
-			statefulset.Spec.VolumeClaimTemplates = append(
-				statefulset.Spec.VolumeClaimTemplates,
-				corev1.PersistentVolumeClaim{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: name,
-						Labels: v.as.GetCommonLabels(map[string]string{
-							"volume_name": volumeName,
-							"volume_path": mountPath,
-						}),
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-						StorageClassName: &v1.RainbondStatefuleShareStorageClass,
-						Resources: corev1.ResourceRequirements{
-							Requests: map[corev1.ResourceName]resource.Quantity{
-								corev1.ResourceStorage: resourceStorage,
-							},
-						},
-					},
-				},
-			)
-			v.volumeMounts = append(v.volumeMounts, corev1.VolumeMount{
-				Name:      name,
-				MountPath: mountPath,
-				ReadOnly:  readOnly,
-			})
-		}
-	case dbmodel.LocalVolumeType:
-		if statefulset := v.as.GetStatefulSet(); statefulset != nil {
-			//do not limit
-			resourceStorage, _ := resource.ParseQuantity("500Gi")
-			statefulset.Spec.VolumeClaimTemplates = append(
-				statefulset.Spec.VolumeClaimTemplates,
-				corev1.PersistentVolumeClaim{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: name,
-						Annotations: map[string]string{
-							client.LabelOS: func() string {
-								if v.as.IsWindowsService {
-									return "windows"
-								}
-								return "linux"
-							}(),
-						},
-						Labels: v.as.GetCommonLabels(map[string]string{
-							"volume_name": volumeName,
-							"volume_path": mountPath,
-						}),
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-						StorageClassName: &v1.RainbondStatefuleLocalStorageClass,
-						Resources: corev1.ResourceRequirements{
-							Requests: map[corev1.ResourceName]resource.Quantity{
-								corev1.ResourceStorage: resourceStorage,
-							},
-						},
-					},
-				},
-			)
-			v.volumeMounts = append(v.volumeMounts, corev1.VolumeMount{
-				Name:      name,
-				MountPath: mountPath,
-				ReadOnly:  readOnly,
-			})
-		}
-	}
-}
-
-func (v *volumeDefine) SetVolume(VolumeType dbmodel.VolumeType, name, mountPath, hostPath string, hostPathType corev1.HostPathType, readOnly bool) {
-	for _, m := range v.volumeMounts {
-		if m.MountPath == mountPath {
-			return
-		}
-	}
-	switch VolumeType {
-	case dbmodel.MemoryFSVolumeType:
-		vo := corev1.Volume{Name: name}
-		vo.EmptyDir = &corev1.EmptyDirVolumeSource{
-			Medium: corev1.StorageMediumMemory,
-		}
-		v.volumes = append(v.volumes, vo)
-		if mountPath != "" {
-			vm := corev1.VolumeMount{
-				MountPath: mountPath,
-				Name:      name,
-				ReadOnly:  readOnly,
-				SubPath:   "",
-			}
-			v.volumeMounts = append(v.volumeMounts, vm)
-		}
-	case dbmodel.ShareFileVolumeType:
-		if hostPath != "" {
-			vo := corev1.Volume{
-				Name: name,
-			}
-			vo.HostPath = &corev1.HostPathVolumeSource{
-				Path: hostPath,
-				Type: &hostPathType,
-			}
-			v.volumes = append(v.volumes, vo)
-			if mountPath != "" {
-				vm := corev1.VolumeMount{
-					MountPath: mountPath,
-					Name:      name,
-					ReadOnly:  readOnly,
-					SubPath:   "",
-				}
-				v.volumeMounts = append(v.volumeMounts, vm)
-			}
-		}
-	case dbmodel.LocalVolumeType:
-		//no support
-		return
-	}
-}
-
-// SetVolumeCMap sets volumes and volumeMounts. The type of volumes is configMap.
-func (v *volumeDefine) SetVolumeCMap(cmap *corev1.ConfigMap, k, p string, isReadOnly bool) {
-	var configFileMode int32 = 0777
-	vm := corev1.VolumeMount{
-		MountPath: p,
-		Name:      cmap.Name,
-		ReadOnly:  false,
-		SubPath:   path.Base(p),
-	}
-	v.volumeMounts = append(v.volumeMounts, vm)
-	var defaultMode int32 = 0777
-	vo := corev1.Volume{
-		Name: cmap.Name,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmap.Name,
-				},
-				DefaultMode: &defaultMode,
-				Items: []corev1.KeyToPath{
-					corev1.KeyToPath{
-						Key:  k,
-						Path: path.Base(p), // subpath
-						Mode: &configFileMode,
-					},
-				},
-			},
-		},
-	}
-	v.volumes = append(v.volumes, vo)
+	return define, nil
 }
 
 func createResources(as *v1.AppService) corev1.ResourceRequirements {
 	var cpuRequest, cpuLimit int64
-	memory := as.ContainerMemory
-	if memory < 512 {
-		cpuRequest, cpuLimit = int64(memory)/128*30, int64(memory)/128*80
-	} else if memory <= 1024 {
-		cpuRequest, cpuLimit = int64(memory)/128*30, int64(memory)/128*160
-	} else {
-		cpuRequest, cpuLimit = int64(memory)/128*30, ((int64(memory)-1024)/1024*500 + 1280)
-	}
 	if limit, ok := as.ExtensionSet["cpulimit"]; ok {
 		limitint, _ := strconv.Atoi(limit)
 		if limitint > 0 {
@@ -732,24 +477,7 @@ func createResources(as *v1.AppService) corev1.ResourceRequirements {
 			cpuRequest = int64(requestint)
 		}
 	}
-	limits := corev1.ResourceList{}
-	limits[corev1.ResourceCPU] = *resource.NewMilliQuantity(
-		cpuLimit,
-		resource.DecimalSI)
-	limits[corev1.ResourceMemory] = *resource.NewQuantity(
-		int64(as.ContainerMemory*1024*1024),
-		resource.BinarySI)
-	request := corev1.ResourceList{}
-	request[corev1.ResourceCPU] = *resource.NewMilliQuantity(
-		cpuRequest,
-		resource.DecimalSI)
-	request[corev1.ResourceMemory] = *resource.NewQuantity(
-		int64(as.ContainerMemory*1024*1024),
-		resource.BinarySI)
-	return corev1.ResourceRequirements{
-		Limits:   limits,
-		Requests: request,
-	}
+	return createResourcesByDefaultCPU(as.ContainerMemory, cpuRequest, cpuLimit)
 }
 
 func checkUpstreamPluginRelation(serviceID string, dbmanager db.Manager) (bool, error) {
@@ -877,6 +605,9 @@ func createNodeSelector(as *v1.AppService, dbmanager db.Manager) map[string]stri
 		for _, l := range labels {
 			if l.LabelValue == "windows" || l.LabelValue == "linux" {
 				selector[client.LabelOS] = l.LabelValue
+				continue
+			}
+			if l.LabelValue == model.LabelKeyServicePrivileged {
 				continue
 			}
 			if strings.Contains(l.LabelValue, "=") {

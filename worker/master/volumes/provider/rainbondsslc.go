@@ -22,33 +22,34 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/goodrain/rainbond/db/dao"
 	"net/http"
 	"time"
 
 	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/db/dao"
+	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/worker/appm/store"
+	"github.com/goodrain/rainbond/worker/master/volumes/provider/lib/controller"
 
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/Sirupsen/logrus"
 
-	"github.com/goodrain/rainbond/node/nodem/client"
 	httputil "github.com/goodrain/rainbond/util/http"
-	"github.com/goodrain/rainbond/worker/master/volumes/provider/lib/controller"
-	"k8s.io/api/core/v1"
+
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type rainbondsslcProvisioner struct {
 	// The directory to create PV-backing directories in
 	name    string
-	kubecli *kubernetes.Clientset
+	kubecli kubernetes.Interface
 	store   store.Storer
 }
 
 // NewRainbondsslcProvisioner creates a new Rainbond statefulset share volume provisioner
-func NewRainbondsslcProvisioner(kubecli *kubernetes.Clientset, store store.Storer) controller.Provisioner {
+func NewRainbondsslcProvisioner(kubecli kubernetes.Interface, store store.Storer) controller.Provisioner {
 	return &rainbondsslcProvisioner{
 		name:    "rainbond.io/provisioner-sslc",
 		kubecli: kubecli,
@@ -135,7 +136,6 @@ func (p *rainbondsslcProvisioner) createPath(options controller.VolumeOptions) (
 			"service_id":  serviceID,
 			"pvcname":     options.PVC.Name,
 			"volume_name": volume.VolumeName,
-			"volume_path": volume.VolumePath,
 			"pod_name":    getPodNameByPVCName(options.PVC.Name),
 		}
 		var ip string
@@ -192,8 +192,8 @@ func (p *rainbondsslcProvisioner) Provision(options controller.VolumeOptions) (*
 		if options.SelectedNode == nil {
 			return nil, fmt.Errorf("do not select an appropriate node for local volume")
 		}
-		if _, ok := options.SelectedNode.Labels["rainbond_node_ip"]; !ok {
-			return nil, fmt.Errorf("select node(%s) do not have label rainbond_node_ip ", options.SelectedNode.Name)
+		if _, ok := options.SelectedNode.Labels["kubernetes.io/hostname"]; !ok {
+			return nil, fmt.Errorf("select node(%s) do not have label kubernetes.io/hostname ", options.SelectedNode.Name)
 		}
 	}
 	path, err := p.createPath(options)
@@ -228,9 +228,9 @@ func (p *rainbondsslcProvisioner) Provision(options controller.VolumeOptions) (*
 						v1.NodeSelectorTerm{
 							MatchExpressions: []v1.NodeSelectorRequirement{
 								v1.NodeSelectorRequirement{
-									Key:      "rainbond_node_ip",
+									Key:      "kubernetes.io/hostname",
 									Operator: v1.NodeSelectorOpIn,
-									Values:   []string{options.SelectedNode.Labels["rainbond_node_ip"]},
+									Values:   []string{options.SelectedNode.Labels["kubernetes.io/hostname"]},
 								},
 							},
 						},

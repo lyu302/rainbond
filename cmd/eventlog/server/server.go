@@ -19,6 +19,7 @@
 package server
 
 import (
+	"context"
 	"os/signal"
 	"path"
 	"syscall"
@@ -28,7 +29,6 @@ import (
 	"github.com/goodrain/rainbond/eventlog/conf"
 	"github.com/goodrain/rainbond/eventlog/entry"
 	"github.com/goodrain/rainbond/eventlog/exit/web"
-	"github.com/goodrain/rainbond/eventlog/exit/webhook"
 	"github.com/goodrain/rainbond/eventlog/store"
 
 	"os"
@@ -38,6 +38,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/eventlog/db"
 	"github.com/goodrain/rainbond/util"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 	"github.com/spf13/pflag"
 )
 
@@ -72,6 +73,9 @@ func (s *LogServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Conf.Cluster.Discover.InstanceIP, "cluster.instance.ip", "", "The current instance IP in the cluster can be communications.")
 	fs.StringVar(&s.Conf.Cluster.Discover.Type, "discover.type", "etcd", "the instance in cluster auto discover way.")
 	fs.StringSliceVar(&s.Conf.Cluster.Discover.EtcdAddr, "discover.etcd.addr", []string{"http://127.0.0.1:2379"}, "set all etcd server addr in cluster for message instence auto discover.")
+	fs.StringVar(&s.Conf.Cluster.Discover.EtcdCaFile, "discover.etcd.ca", "", "verify etcd certificates of TLS-enabled secure servers using this CA bundle")
+	fs.StringVar(&s.Conf.Cluster.Discover.EtcdCertFile, "discover.etcd.cert", "", "identify secure etcd client using this TLS certificate file")
+	fs.StringVar(&s.Conf.Cluster.Discover.EtcdKeyFile, "discover.etcd.key", "", "identify secure etcd client using this TLS key file")
 	fs.StringVar(&s.Conf.Cluster.Discover.HomePath, "discover.etcd.homepath", "/event", "etcd home key")
 	fs.StringVar(&s.Conf.Cluster.Discover.EtcdUser, "discover.etcd.user", "", "etcd server user info")
 	fs.StringVar(&s.Conf.Cluster.Discover.EtcdPass, "discover.etcd.pass", "", "etcd server user password")
@@ -82,7 +86,7 @@ func (s *LogServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Conf.EventStore.GarbageMessageFile, "message.garbage.file", "/var/log/envent_garbage_message.log", "save garbage message file path when save type is file")
 	fs.Int64Var(&s.Conf.EventStore.PeerEventMaxLogNumber, "message.max.number", 100000, "the max number log message for peer event")
 	fs.IntVar(&s.Conf.EventStore.PeerEventMaxCacheLogNumber, "message.cache.number", 256, "Maintain log the largest number in the memory peer event")
-	fs.Int64Var(&s.Conf.EventStore.PeerDockerMaxCacheLogNumber, "dockermessage.cache.number", 512, "Maintain log the largest number in the memory peer docker service")
+	fs.Int64Var(&s.Conf.EventStore.PeerDockerMaxCacheLogNumber, "dockermessage.cache.number", 128, "Maintain log the largest number in the memory peer docker service")
 	fs.IntVar(&s.Conf.EventStore.HandleMessageCoreNumber, "message.handle.core.number", 2, "The number of concurrent processing receive log data.")
 	fs.IntVar(&s.Conf.EventStore.HandleSubMessageCoreNumber, "message.sub.handle.core.number", 3, "The number of concurrent processing receive log data. more than message.handle.core.number")
 	fs.IntVar(&s.Conf.EventStore.HandleDockerLogCoreNumber, "message.dockerlog.handle.core.number", 2, "The number of concurrent processing receive log data. more than message.handle.core.number")
@@ -106,8 +110,6 @@ func (s *LogServer) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&s.Conf.EventStore.DB.PoolSize, "db.pool.size", 3, "Data persistence db pool init size.")
 	fs.IntVar(&s.Conf.EventStore.DB.PoolMaxSize, "db.pool.maxsize", 10, "Data persistence db pool max size.")
 	fs.StringVar(&s.Conf.EventStore.DB.HomePath, "docker.log.homepath", "/grdata/logs/", "container log persistent home path")
-	fs.StringVar(&s.Conf.WebHook.ConsoleURL, "webhook.console.url", "http://console.goodrain.me", "console web api url")
-	fs.StringVar(&s.Conf.WebHook.ConsoleToken, "webhook.console.token", "", "console web api token")
 	fs.StringVar(&s.Conf.Entry.NewMonitorMessageServerConf.ListenerHost, "monitor.udp.host", "0.0.0.0", "receive new monitor udp server host")
 	fs.IntVar(&s.Conf.Entry.NewMonitorMessageServerConf.ListenerPort, "monitor.udp.port", 6166, "receive new monitor udp server port")
 	fs.StringVar(&s.Conf.Cluster.Discover.NodeIDFile, "nodeid-file", "/opt/rainbond/etc/node/node_host_uuid.conf", "the unique ID for this node. Just specify, don't modify")
@@ -150,12 +152,6 @@ func (s *LogServer) InitLog() {
 		}
 	}
 	log.Formatter = &logrus.TextFormatter{}
-	// hook, err := logrus_mail.NewMailHook("EventLog", "HOST", 25, "FROM", "TO")
-	// if err != nil {
-	// 	log.Error("Create mail hook for log error.", err.Error())
-	// } else {
-	// 	log.Hooks.Add(hook)
-	// }
 	s.Logger = log
 }
 
@@ -173,9 +169,6 @@ func (s *LogServer) InitConf() {
 	if os.Getenv("CLUSTER_BIND_IP") != "" {
 		s.Conf.Cluster.PubSub.PubBindIP = os.Getenv("CLUSTER_BIND_IP")
 	}
-	if os.Getenv("CONSOLE_TOKEN") != "" {
-		s.Conf.WebHook.ConsoleToken = os.Getenv("CONSOLE_TOKEN")
-	}
 }
 
 //Run 执行
@@ -183,9 +176,19 @@ func (s *LogServer) Run() error {
 	s.Logger.Debug("Start run server.")
 	log := s.Logger
 
-	if err := webhook.InitManager(s.Conf.WebHook, log.WithField("module", "WebHook")); err != nil {
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: s.Conf.Cluster.Discover.EtcdAddr,
+		CaFile:    s.Conf.Cluster.Discover.EtcdCaFile,
+		CertFile:  s.Conf.Cluster.Discover.EtcdCertFile,
+		KeyFile:   s.Conf.Cluster.Discover.EtcdKeyFile,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	etcdClient, err := etcdutil.NewClient(ctx, etcdClientArgs)
+	if err != nil {
 		return err
 	}
+	defer cancel()
 
 	//init new db
 	if err := db.CreateDBManager(s.Conf.EventStore.DB); err != nil {
@@ -203,13 +206,14 @@ func (s *LogServer) Run() error {
 	}
 	defer storeManager.Stop()
 	if s.Conf.ClusterMode {
-		s.Cluster = cluster.NewCluster(s.Conf.Cluster, log.WithField("module", "Cluster"), storeManager)
+		s.Cluster = cluster.NewCluster(etcdClient, s.Conf.Cluster, log.WithField("module", "Cluster"), storeManager)
 		if err := s.Cluster.Start(); err != nil {
 			return err
 		}
 		defer s.Cluster.Stop()
 	}
-	s.SocketServer = web.NewSocket(s.Conf.WebSocket, log.WithField("module", "SocketServer"), storeManager, s.Cluster, healthInfo)
+	s.SocketServer = web.NewSocket(s.Conf.WebSocket, s.Conf.Cluster.Discover, etcdClient,
+		log.WithField("module", "SocketServer"), storeManager, s.Cluster, healthInfo)
 	if err := s.SocketServer.Run(); err != nil {
 		return err
 	}
@@ -222,7 +226,7 @@ func (s *LogServer) Run() error {
 	defer s.Entry.Stop()
 
 	//服务注册
-	grpckeepalive, err := discover.CreateKeepAlive(s.Conf.Cluster.Discover.EtcdAddr, "event_log_event_grpc",
+	grpckeepalive, err := discover.CreateKeepAlive(etcdClientArgs, "event_log_event_grpc",
 		s.Conf.Cluster.Discover.InstanceIP, s.Conf.Cluster.Discover.InstanceIP, s.Conf.Entry.EventLogServer.BindPort)
 	if err != nil {
 		return err
@@ -232,7 +236,7 @@ func (s *LogServer) Run() error {
 	}
 	defer grpckeepalive.Stop()
 
-	udpkeepalive, err := discover.CreateKeepAlive(s.Conf.Cluster.Discover.EtcdAddr, "event_log_event_udp",
+	udpkeepalive, err := discover.CreateKeepAlive(etcdClientArgs, "event_log_event_udp",
 		s.Conf.Cluster.Discover.InstanceIP, s.Conf.Cluster.Discover.InstanceIP, s.Conf.Entry.NewMonitorMessageServerConf.ListenerPort)
 	if err != nil {
 		return err
@@ -252,7 +256,7 @@ func (s *LogServer) Run() error {
 	} else {
 		id = hostID[len(hostID)-12:]
 	}
-	httpkeepalive, err := discover.CreateKeepAlive(s.Conf.Cluster.Discover.EtcdAddr, "event_log_event_http",
+	httpkeepalive, err := discover.CreateKeepAlive(etcdClientArgs, "event_log_event_http",
 		id, s.Conf.Cluster.Discover.InstanceIP, s.Conf.WebSocket.BindPort)
 	if err != nil {
 		return err

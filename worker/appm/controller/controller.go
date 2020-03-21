@@ -23,11 +23,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/goodrain/rainbond/worker/appm/store"
-	"github.com/goodrain/rainbond/worker/appm/types/v1"
-
 	"github.com/goodrain/rainbond/util"
-
+	"github.com/goodrain/rainbond/worker/appm/store"
+	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -61,25 +59,32 @@ var TypeApplyRuleController TypeController = "apply_rule"
 // TypeApplyConfigController -
 var TypeApplyConfigController TypeController = "apply_config"
 
+// TypeControllerRefreshHPA -
+var TypeControllerRefreshHPA TypeController = "refreshhpa"
+
 //Manager controller manager
 type Manager struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	client      *kubernetes.Clientset
-	controllers map[string]Controller
-	store       store.Storer
-	lock        sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	client       kubernetes.Interface
+	rbdNamespace string
+	rbdDNSName   string
+	controllers  map[string]Controller
+	store        store.Storer
+	lock         sync.Mutex
 }
 
 //NewManager new manager
-func NewManager(store store.Storer, client *kubernetes.Clientset) *Manager {
+func NewManager(store store.Storer, client kubernetes.Interface, rbdNamespace, rbdDNSName string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		ctx:         ctx,
-		cancel:      cancel,
-		client:      client,
-		controllers: make(map[string]Controller),
-		store:       store,
+		ctx:          ctx,
+		cancel:       cancel,
+		client:       client,
+		controllers:  make(map[string]Controller),
+		store:        store,
+		rbdNamespace: rbdNamespace,
+		rbdDNSName:   rbdDNSName,
 	}
 }
 
@@ -150,6 +155,13 @@ func (m *Manager) StartController(controllerType TypeController, apps ...v1.AppS
 			manager:      m,
 			stopChan:     make(chan struct{}),
 		}
+	case TypeControllerRefreshHPA:
+		controller = &refreshXPAController{
+			controllerID: controllerID,
+			appService:   apps,
+			manager:      m,
+			stopChan:     make(chan struct{}),
+		}
 	default:
 		return fmt.Errorf("No support controller")
 	}
@@ -164,25 +176,6 @@ func (m *Manager) callback(controllerID string, err error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	delete(m.controllers, controllerID)
-}
-
-func getLoggerOption(status string) map[string]string {
-	return map[string]string{"step": "appruntime", "status": status}
-}
-
-//GetCallbackLoggerOption get callback logger
-func GetCallbackLoggerOption() map[string]string {
-	return map[string]string{"step": "callback", "status": "failure"}
-}
-
-//GetTimeoutLoggerOption get callback logger
-func GetTimeoutLoggerOption() map[string]string {
-	return map[string]string{"step": "callback", "status": "timeout"}
-}
-
-//GetLastLoggerOption get last logger
-func GetLastLoggerOption() map[string]string {
-	return map[string]string{"step": "last", "status": "success"}
 }
 
 type sequencelist []sequence

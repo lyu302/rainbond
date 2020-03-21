@@ -27,6 +27,7 @@ import (
 )
 
 const (
+	Stat_Unknow    string = "unknow"    //健康
 	Stat_healthy   string = "healthy"   //健康
 	Stat_unhealthy string = "unhealthy" //出现异常
 	Stat_death     string = "death"     //请求不通
@@ -70,6 +71,7 @@ func (s *Service) Equal(e *Service) bool {
 type Services struct {
 	Version  string     `yaml:"version"`
 	Services []*Service `yaml:"services"`
+	FromFile string     `yaml:"-"`
 }
 
 //Endpoint endpoint

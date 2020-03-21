@@ -25,18 +25,18 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/goodrain/rainbond/worker/master/volumes/provider"
-
-	"github.com/goodrain/rainbond/db"
-	"github.com/goodrain/rainbond/db/model"
-	"github.com/goodrain/rainbond/worker/master/volumes/statistical"
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/goodrain/rainbond/worker/appm/store"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/goodrain/rainbond/cmd/worker/option"
+	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/util/leader"
+	"github.com/goodrain/rainbond/worker/appm/store"
+	"github.com/goodrain/rainbond/worker/master/podevent"
+	"github.com/goodrain/rainbond/worker/master/volumes/provider"
 	"github.com/goodrain/rainbond/worker/master/volumes/provider/lib/controller"
+	"github.com/goodrain/rainbond/worker/master/volumes/statistical"
 )
 
 //Controller app runtime master controller
@@ -51,6 +51,10 @@ type Controller struct {
 	diskCache *statistical.DiskCache
 	pc        *controller.ProvisionController
 	isLeader  bool
+
+	stopCh      chan struct{}
+	podEventChs []chan *corev1.Pod
+	podEvent    *podevent.PodEvent
 }
 
 //NewMasterController new master controller
@@ -77,10 +81,13 @@ func NewMasterController(conf option.Config, store store.Storer) (*Controller, e
 		rainbondssscProvisioner.Name(): rainbondssscProvisioner,
 		rainbondsslcProvisioner.Name(): rainbondsslcProvisioner,
 	}, serverVersion.GitVersion)
+	stopCh := make(chan struct{})
+
 	return &Controller{
 		conf:      conf,
 		pc:        pc,
 		store:     store,
+		stopCh:    stopCh,
 		cancel:    cancel,
 		ctx:       ctx,
 		dbmanager: db.GetManager(),
@@ -95,6 +102,7 @@ func NewMasterController(conf option.Config, store store.Storer) (*Controller, e
 			Help:      "tenant service fs used.",
 		}, []string{"tenant_id", "service_id", "volume_type"}),
 		diskCache: statistical.CreatDiskCache(ctx),
+		podEvent:  podevent.New(conf.KubeClient, stopCh),
 	}, nil
 }
 
@@ -105,15 +113,22 @@ func (m *Controller) IsLeader() bool {
 
 //Start start
 func (m *Controller) Start() error {
-	start := func(stop <-chan struct{}) {
+	logrus.Debug("master controller starting")
+	start := func(ctx context.Context) {
 		m.isLeader = true
 		defer func() {
 			m.isLeader = false
 		}()
 		go m.diskCache.Start()
 		defer m.diskCache.Stop()
-		go m.pc.Run(stop)
-		<-stop
+		go m.pc.Run(ctx)
+		m.store.RegistPodUpdateListener("podEvent", m.podEvent.GetChan())
+		defer m.store.UnRegistPodUpdateListener("podEvent")
+		go m.podEvent.Handle()
+		select {
+		case <-ctx.Done():
+		case <-m.ctx.Done():
+		}
 	}
 	// Leader election was requested.
 	if m.conf.LeaderElectionNamespace == "" {
@@ -127,13 +142,14 @@ func (m *Controller) Start() error {
 	}
 	// Name of config map with leader election lock
 	lockName := "rainbond-appruntime-worker-leader"
-	go leader.RunAsLeader(m.conf.KubeClient, m.conf.LeaderElectionNamespace, m.conf.LeaderElectionIdentity, lockName, start, func() {})
+	go leader.RunAsLeader(m.ctx, m.conf.KubeClient, m.conf.LeaderElectionNamespace, m.conf.LeaderElectionIdentity, lockName, start, func() {})
+
 	return nil
 }
 
 //Stop stop
 func (m *Controller) Stop() {
-
+	close(m.stopCh)
 }
 
 //Scrape scrape app runtime
@@ -162,4 +178,5 @@ func (m *Controller) Scrape(ch chan<- prometheus.Metric, scrapeDurationDesc *pro
 	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, time.Since(scrapeTime).Seconds(), "collect.fs")
 	m.fsUse.Collect(ch)
 	m.memoryUse.Collect(ch)
+	logrus.Infof("success collect app disk and memory used metric")
 }

@@ -19,6 +19,7 @@
 package monitor
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/Sirupsen/logrus"
@@ -26,6 +27,7 @@ import (
 	"github.com/goodrain/rainbond/node/api"
 	"github.com/goodrain/rainbond/node/monitormessage"
 	"github.com/goodrain/rainbond/node/statsd"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/node_exporter/collector"
@@ -66,11 +68,17 @@ func createNodeExporterRestry() (*prometheus.Registry, error) {
 }
 
 //CreateManager CreateManager
-func CreateManager(c *option.Conf) (Manager, error) {
+func CreateManager(ctx context.Context, c *option.Conf) (Manager, error) {
 	//statsd exporter
 	statsdRegistry := prometheus.NewRegistry()
 	exporter := statsd.CreateExporter(c.StatsdConfig, statsdRegistry)
-	meserver := monitormessage.CreateUDPServer("0.0.0.0", 6666, c.Etcd.Endpoints)
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: c.EtcdEndpoints,
+		CaFile:    c.EtcdCaFile,
+		CertFile:  c.EtcdCertFile,
+		KeyFile:   c.EtcdKeyFile,
+	}
+	meserver := monitormessage.CreateUDPServer(ctx, "0.0.0.0", 6666, etcdClientArgs)
 	nodeExporterRestry, err := createNodeExporterRestry()
 	if err != nil {
 		return nil, err

@@ -20,24 +20,21 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/go-chi/chi"
+	"github.com/goodrain/rainbond/node/api/model"
 	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/node/utils"
+	httputil "github.com/goodrain/rainbond/util/http"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/version"
-
-	"github.com/goodrain/rainbond/node/api/model"
-
-	"errors"
-	"io/ioutil"
-	"strconv"
-
-	httputil "github.com/goodrain/rainbond/util/http"
 )
 
 func init() {
@@ -52,7 +49,6 @@ func InstallNode(w http.ResponseWriter, r *http.Request) {
 		err.Handle(r, w)
 		return
 	}
-
 	if err := nodeService.InstallNode(node); err != nil {
 		err.Handle(r, w)
 		return
@@ -133,7 +129,7 @@ func GetRuleNodes(w http.ResponseWriter, r *http.Request) {
 	rule := chi.URLParam(r, "rule")
 	allowRule := map[string]struct{}{
 		"compute": struct{}{},
-		"manage": struct{}{},
+		"manage":  struct{}{},
 		"storage": struct{}{},
 		"gateway": struct{}{},
 	}
@@ -153,25 +149,6 @@ func GetRuleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httputil.ReturnSuccess(r, w, masternodes)
-}
-
-//InitStatus init status
-func InitStatus(w http.ResponseWriter, r *http.Request) {
-	nodeIP := strings.TrimSpace(chi.URLParam(r, "node_ip"))
-	if len(nodeIP) == 0 {
-		err := utils.APIHandleError{
-			Code: 404,
-			Err:  fmt.Errorf("can't find node by node_ip %s", nodeIP),
-		}
-		err.Handle(r, w)
-		return
-	}
-	status, err := nodeService.InitStatus(nodeIP)
-	if err != nil {
-		err.Handle(r, w)
-		return
-	}
-	httputil.ReturnSuccess(r, w, status)
 }
 
 //Resource -
@@ -278,23 +255,45 @@ func PutLabel(w http.ResponseWriter, r *http.Request) {
 		logrus.Errorf("error unmarshal labels  ,details %s", error.Error())
 		return
 	}
-	err := nodeService.PutNodeLabel(nodeUID, label)
+	labels, err := nodeService.PutNodeLabel(nodeUID, label)
 	if err != nil {
 		err.Handle(r, w)
 		return
 	}
-	httputil.ReturnSuccess(r, w, nil)
+	httputil.ReturnSuccess(r, w, labels)
+}
+
+//DeleteLabel delete node label
+func DeleteLabel(w http.ResponseWriter, r *http.Request) {
+	nodeUID := strings.TrimSpace(chi.URLParam(r, "node_id"))
+	var label = make(map[string]string)
+	in, error := ioutil.ReadAll(r.Body)
+	if error != nil {
+		logrus.Errorf("error read from request ,details %s", error.Error())
+		return
+	}
+	error = json.Unmarshal(in, &label)
+	if error != nil {
+		logrus.Errorf("error unmarshal labels  ,details %s", error.Error())
+		return
+	}
+	labels, err := nodeService.DeleteNodeLabel(nodeUID, label)
+	if err != nil {
+		err.Handle(r, w)
+		return
+	}
+	httputil.ReturnSuccess(r, w, labels)
 }
 
 //GetLabel get node label
 func GetLabel(w http.ResponseWriter, r *http.Request) {
 	nodeUID := strings.TrimSpace(chi.URLParam(r, "node_id"))
-	node, err := nodeService.GetNode(nodeUID)
+	labels, err := nodeService.GetNodeLabels(nodeUID)
 	if err != nil {
 		err.Handle(r, w)
 		return
 	}
-	httputil.ReturnSuccess(r, w, node.Labels)
+	httputil.ReturnSuccess(r, w, labels)
 }
 
 //ListNodeCondition list node condition

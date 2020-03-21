@@ -23,11 +23,13 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	workerutil "github.com/goodrain/rainbond/worker/util"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/util"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
-
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,19 +57,19 @@ func (s *startController) Begin() {
 				wait.Add(1)
 				defer wait.Done()
 				logrus.Debugf("App runtime begin start app service(%s)", service.ServiceAlias)
-				service.Logger.Info("App runtime begin start app service "+service.ServiceAlias, getLoggerOption("starting"))
+				service.Logger.Info("App runtime begin start app service "+service.ServiceAlias, event.GetLoggerOption("starting"))
 				if err := s.startOne(service); err != nil {
 					if err != ErrWaitTimeOut {
-						service.Logger.Error(fmt.Sprintf("Start service %s failure %s", service.ServiceAlias, err.Error()), GetCallbackLoggerOption())
+						service.Logger.Error(util.Translation("start service error"), event.GetCallbackLoggerOption())
 						logrus.Errorf("start service %s failure %s", service.ServiceAlias, err.Error())
 						s.errorCallback(service)
 					} else {
 						logrus.Debugf("Start service %s timeout, please wait or read service log.", service.ServiceAlias)
-						service.Logger.Error(fmt.Sprintf("Start service %s timeout,please wait or read service log.", service.ServiceAlias), GetTimeoutLoggerOption())
+						service.Logger.Error(util.Translation("start service timeout"), event.GetTimeoutLoggerOption())
 					}
 				} else {
 					logrus.Debugf("Start service %s success", service.ServiceAlias)
-					service.Logger.Info(fmt.Sprintf("Start service %s success", service.ServiceAlias), GetLastLoggerOption())
+					service.Logger.Info(fmt.Sprintf("Start service %s success", service.ServiceAlias), event.GetLastLoggerOption())
 				}
 			}(*service)
 		}
@@ -76,13 +78,13 @@ func (s *startController) Begin() {
 	}
 }
 func (s *startController) errorCallback(app v1.AppService) error {
-	app.Logger.Info("Begin clean resources that have been created", getLoggerOption("starting"))
+	app.Logger.Info("Begin clean resources that have been created", event.GetLoggerOption("starting"))
 	stopController := stopController{
 		manager: s.manager,
 	}
 	if err := stopController.stopOne(app); err != nil {
 		logrus.Errorf("stop app failure after start failure. %s", err.Error())
-		app.Logger.Error(fmt.Sprintf("Stop app failure %s", app.ServiceAlias), getLoggerOption("failure"))
+		app.Logger.Error(fmt.Sprintf("Stop app failure %s", app.ServiceAlias), event.GetLoggerOption("failure"))
 		return err
 	}
 	return nil
@@ -107,45 +109,74 @@ func (s *startController) startOne(app v1.AppService) error {
 			}
 		}
 	}
+	// before create app, prepare poddnsconfig
+	podDNSConfig := workerutil.MakePodDNSConfig(s.manager.client, app.TenantID, s.manager.rbdNamespace, s.manager.rbdDNSName)
 	//step 2: create statefulset or deployment
 	if statefulset := app.GetStatefulSet(); statefulset != nil {
-		_, err := s.manager.client.AppsV1().StatefulSets(app.TenantID).Create(statefulset)
+		if podDNSConfig != nil {
+			statefulset.Spec.Template.Spec.DNSConfig = podDNSConfig
+			statefulset.Spec.Template.Spec.DNSPolicy = "None"
+		}
+
+		_, err = s.manager.client.AppsV1().StatefulSets(app.TenantID).Create(statefulset)
 		if err != nil {
 			return fmt.Errorf("create statefulset failure:%s", err.Error())
 		}
 	}
 	if deployment := app.GetDeployment(); deployment != nil {
-		_, err := s.manager.client.AppsV1().Deployments(app.TenantID).Create(deployment)
+		if podDNSConfig != nil {
+			deployment.Spec.Template.Spec.DNSConfig = podDNSConfig
+			deployment.Spec.Template.Spec.DNSPolicy = "None"
+		}
+
+		_, err = s.manager.client.AppsV1().Deployments(app.TenantID).Create(deployment)
 		if err != nil {
 			return fmt.Errorf("create deployment failure:%s;", err.Error())
 		}
 	}
 	//step 3: create services
-	if services := app.GetServices(); services != nil {
+	if services := app.GetServices(true); services != nil {
 		if err := CreateKubeService(s.manager.client, app.TenantID, services...); err != nil {
 			return fmt.Errorf("Create service failure %s", err.Error())
 		}
 	}
 	//step 4: create secrets
-	if secrets := app.GetSecrets(); secrets != nil {
+	if secrets := app.GetSecrets(true); secrets != nil {
 		for _, secret := range secrets {
-			_, err := s.manager.client.CoreV1().Secrets(app.TenantID).Create(secret)
-			if err != nil && !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("create secret failure:%s", err.Error())
+			if len(secret.ResourceVersion) == 0 {
+				_, err := s.manager.client.CoreV1().Secrets(app.TenantID).Create(secret)
+				if err != nil && !errors.IsAlreadyExists(err) {
+					return fmt.Errorf("create secret failure:%s", err.Error())
+				}
 			}
 		}
 	}
 	//step 5: create ingress
-	if ingresses := app.GetIngress(); ingresses != nil {
+	if ingresses := app.GetIngress(true); ingresses != nil {
 		for _, ingress := range ingresses {
-			_, err := s.manager.client.ExtensionsV1beta1().Ingresses(app.TenantID).Create(ingress)
-			if err != nil && !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("create ingress failure:%s", err.Error())
+			if len(ingress.ResourceVersion) == 0 {
+				_, err := s.manager.client.ExtensionsV1beta1().Ingresses(app.TenantID).Create(ingress)
+				if err != nil && !errors.IsAlreadyExists(err) {
+					return fmt.Errorf("create ingress failure:%s", err.Error())
+				}
 			}
 		}
 	}
+
+	if hpas := app.GetHPAs(); len(hpas) != 0 {
+		for _, hpa := range hpas {
+			if len(hpa.ResourceVersion) == 0 {
+				_, err := s.manager.client.AutoscalingV2beta1().HorizontalPodAutoscalers(hpa.GetNamespace()).Create(hpa)
+				if err != nil && !errors.IsAlreadyExists(err) {
+					logrus.Debugf("hpa: %#v", hpa)
+					return fmt.Errorf("create hpa: %v", err)
+				}
+			}
+		}
+	}
+
 	//step 6: waiting endpoint ready
-	app.Logger.Info("Create all app model success, will waiting app ready", getLoggerOption("running"))
+	app.Logger.Info("Create all app model success, will waiting app ready", event.GetLoggerOption("running"))
 	return s.WaitingReady(app)
 }
 

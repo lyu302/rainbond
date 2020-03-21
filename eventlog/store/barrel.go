@@ -140,12 +140,6 @@ func (r *readEventBarrel) insertMessage(message *db.EventLogMessage) {
 func (r *readEventBarrel) pushCashMessage(ch chan *db.EventLogMessage, subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	// for _, m := range r.barrel {
-	// 	select {
-	// 	case ch <- m:
-	// 	default:
-	// 	}
-	// }
 	r.subSocketChan[subID] = ch
 }
 
@@ -165,7 +159,8 @@ func (r *readEventBarrel) addSubChan(subID string) chan *db.EventLogMessage {
 func (r *readEventBarrel) delSubChan(subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	if _, ok := r.subSocketChan[subID]; ok {
+	if ch, ok := r.subSocketChan[subID]; ok {
+		close(ch)
 		delete(r.subSocketChan, subID)
 	}
 }
@@ -205,6 +200,9 @@ func (r *dockerLogEventBarrel) insertMessage(message *db.EventLogMessage) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
 	r.barrel = append(r.barrel, message)
+	if r.name == "" {
+		r.name = message.EventID
+	}
 	r.updateTime = time.Now()
 	for _, v := range r.subSocketChan { //向订阅的通道发送消息
 		select {
@@ -221,13 +219,6 @@ func (r *dockerLogEventBarrel) insertMessage(message *db.EventLogMessage) {
 func (r *dockerLogEventBarrel) pushCashMessage(ch chan *db.EventLogMessage, subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	// send cache log will cause user illusion
-	// for _, m := range r.barrel {
-	// 	select {
-	// 	case ch <- m:
-	// 	default:
-	// 	}
-	// }
 	r.subSocketChan[subID] = ch
 }
 
@@ -247,7 +238,8 @@ func (r *dockerLogEventBarrel) addSubChan(subID string) chan *db.EventLogMessage
 func (r *dockerLogEventBarrel) delSubChan(subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	if _, ok := r.subSocketChan[subID]; ok {
+	if ch, ok := r.subSocketChan[subID]; ok {
+		close(ch)
 		delete(r.subSocketChan, subID)
 	}
 }
@@ -263,7 +255,7 @@ func (r *dockerLogEventBarrel) persistence() {
 	case r.barrelEvent <- []string{"persistence", r.name}: //发出持久化命令
 		r.persistenceTime = time.Now()
 	default:
-		logrus.Debug("docker log persistence delay")
+		logrus.Errorln("docker log persistence delay")
 	}
 }
 
@@ -299,8 +291,6 @@ func (r *monitorMessageBarrel) empty() {
 }
 
 func (r *monitorMessageBarrel) insertMessage(message *db.EventLogMessage) {
-	//r.barrel = append(r.barrel, message)
-	//logrus.Info(string(message.Content))
 	r.updateTime = time.Now()
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
@@ -315,12 +305,6 @@ func (r *monitorMessageBarrel) insertMessage(message *db.EventLogMessage) {
 func (r *monitorMessageBarrel) pushCashMessage(ch chan *db.EventLogMessage, subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	// for _, m := range r.barrel {
-	// 	select {
-	// 	case ch <- m:
-	// 	default:
-	// 	}
-	// }
 	r.subSocketChan[subID] = ch
 }
 
@@ -340,7 +324,8 @@ func (r *monitorMessageBarrel) addSubChan(subID string) chan *db.EventLogMessage
 func (r *monitorMessageBarrel) delSubChan(subID string) {
 	r.subLock.Lock()
 	defer r.subLock.Unlock()
-	if _, ok := r.subSocketChan[subID]; ok {
+	if ch, ok := r.subSocketChan[subID]; ok {
+		close(ch)
 		delete(r.subSocketChan, subID)
 	}
 }

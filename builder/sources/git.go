@@ -43,7 +43,7 @@ import (
 	"github.com/goodrain/rainbond/util"
 	netssh "golang.org/x/crypto/ssh"
 	sshkey "golang.org/x/crypto/ssh"
-	"gopkg.in/src-d/go-git.v4"
+	git "gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport/client"
@@ -101,6 +101,14 @@ func RemoveDir(path string) error {
 	}
 	return os.RemoveAll(path)
 }
+func getShowURL(rurl string) string {
+	urlpath, _ := url.Parse(rurl)
+	if urlpath != nil {
+		showURL := fmt.Sprintf("%s://%s%s", urlpath.Scheme, urlpath.Host, urlpath.Path)
+		return showURL
+	}
+	return ""
+}
 
 //GitClone git clone code
 func GitClone(csi CodeSourceInfo, sourceDir string, logger event.Logger, timeout int) (*git.Repository, error) {
@@ -108,7 +116,8 @@ func GitClone(csi CodeSourceInfo, sourceDir string, logger event.Logger, timeout
 	flag := true
 Loop:
 	if logger != nil {
-		logger.Info(fmt.Sprintf("Start clone source code from %s", csi.RepositoryURL), map[string]string{"step": "clone_code"})
+		//Hide possible account key information
+		logger.Info(fmt.Sprintf("Start clone source code from %s", getShowURL(csi.RepositoryURL)), map[string]string{"step": "clone_code"})
 	}
 	ep, err := transport.NewEndpoint(csi.RepositoryURL)
 	if err != nil {
@@ -120,7 +129,7 @@ Loop:
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*time.Duration(timeout))
 	defer cancel()
 	writer := logger.GetWriter("progress", "debug")
-	writer.SetFormat(`{"progress":"%s","id":"Clone:"}`)
+	writer.SetFormat(map[string]interface{}{"progress": "%s", "id": "Clone:"})
 	opts := &git.CloneOptions{
 		URL:               csi.RepositoryURL,
 		Progress:          writer,
@@ -256,7 +265,7 @@ Loop:
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*time.Duration(timeout))
 	defer cancel()
 	writer := logger.GetWriter("progress", "debug")
-	writer.SetFormat(`{"progress":"%s","id":"Pull:"}`)
+	writer.SetFormat(map[string]interface{}{"progress": "%s", "id": "Pull:"})
 	opts := &git.PullOptions{
 		Progress:     writer,
 		SingleBranch: true,

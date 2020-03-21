@@ -20,19 +20,24 @@ package store
 
 import (
 	appsv1 "k8s.io/client-go/listers/apps/v1"
+	"k8s.io/client-go/listers/autoscaling/v2beta1"
 	corev1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/listers/extensions/v1beta1"
+	storagev1 "k8s.io/client-go/listers/storage/v1"
 )
 
 //Lister kube-api client cache
 type Lister struct {
-	Ingress     v1beta1.IngressLister
-	Service     corev1.ServiceLister
-	Secret      corev1.SecretLister
-	StatefulSet appsv1.StatefulSetLister
-	Deployment  appsv1.DeploymentLister
-	Pod         corev1.PodLister
-	ConfigMap   corev1.ConfigMapLister
-	Endpoints   corev1.EndpointsLister
-	Nodes       corev1.NodeLister
+	Ingress                 v1beta1.IngressLister
+	Service                 corev1.ServiceLister
+	Secret                  corev1.SecretLister
+	StatefulSet             appsv1.StatefulSetLister
+	Deployment              appsv1.DeploymentLister
+	Pod                     corev1.PodLister
+	ConfigMap               corev1.ConfigMapLister
+	Endpoints               corev1.EndpointsLister
+	Nodes                   corev1.NodeLister
+	StorageClass            storagev1.StorageClassLister
+	Claims                  corev1.PersistentVolumeClaimLister
+	HorizontalPodAutoscaler v2beta1.HorizontalPodAutoscalerLister
 }

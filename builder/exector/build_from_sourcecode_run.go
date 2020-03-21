@@ -19,46 +19,49 @@
 package exector
 
 import (
+	"context"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"os"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/goodrain/rainbond/builder"
-	"github.com/goodrain/rainbond/util"
-
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/client"
+	"github.com/goodrain/rainbond/builder"
+	"github.com/goodrain/rainbond/builder/build"
 	"github.com/goodrain/rainbond/builder/parser"
 	"github.com/goodrain/rainbond/builder/parser/code"
-	"github.com/goodrain/rainbond/event"
-	"github.com/pquerna/ffjson/ffjson"
-	"github.com/tidwall/gjson"
-
-	//"github.com/docker/docker/api/types"
-
-	//"github.com/docker/docker/client"
-
-	"github.com/docker/docker/client"
-	"github.com/goodrain/rainbond/builder/build"
 	"github.com/goodrain/rainbond/builder/sources"
 	"github.com/goodrain/rainbond/db"
 	dbmodel "github.com/goodrain/rainbond/db/model"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/util"
+	"github.com/pquerna/ffjson/ffjson"
+	"github.com/tidwall/gjson" //"github.com/docker/docker/api/types"
+	"k8s.io/client-go/kubernetes"
+	//"github.com/docker/docker/client"
 )
 
 //SourceCodeBuildItem SouceCodeBuildItem
 type SourceCodeBuildItem struct {
-	Namespace    string       `json:"namespace"`
-	TenantName   string       `json:"tenant_name"`
-	ServiceAlias string       `json:"service_alias"`
-	Action       string       `json:"action"`
-	DestImage    string       `json:"dest_image"`
-	Logger       event.Logger `json:"logger"`
-	EventID      string       `json:"event_id"`
-	CacheDir     string       `json:"cache_dir"`
+	Namespace     string       `json:"namespace"`
+	TenantName    string       `json:"tenant_name"`
+	GRDataPVCName string       `json:"gr_data_pvc_name"`
+	CachePVCName  string       `json:"cache_pvc_name"`
+	ServiceAlias  string       `json:"service_alias"`
+	Action        string       `json:"action"`
+	DestImage     string       `json:"dest_image"`
+	Logger        event.Logger `json:"logger"`
+	EventID       string       `json:"event_id"`
+	CacheDir      string       `json:"cache_dir"`
 	//SourceDir     string       `json:"source_dir"`
 	TGZDir        string `json:"tgz_dir"`
 	DockerClient  *client.Client
+	KubeClient    kubernetes.Interface
+	RbdNamespace  string
+	RbdRepoName   string
 	TenantID      string
 	ServiceID     string
 	DeployVersion string
@@ -69,6 +72,7 @@ type SourceCodeBuildItem struct {
 	RepoInfo      *sources.RepostoryBuildInfo
 	commit        Commit
 	Configs       map[string]gjson.Result `json:"configs"`
+	Ctx           context.Context
 }
 
 //Commit code Commit
@@ -120,7 +124,6 @@ func NewSouceCodeBuildItem(in []byte) *SourceCodeBuildItem {
 
 //Run Run
 func (i *SourceCodeBuildItem) Run(timeout time.Duration) error {
-	//TODO:
 	// 1.clone
 	// 2.check dockerfile/ source_code
 	// 3.build
@@ -178,6 +181,12 @@ func (i *SourceCodeBuildItem) Run(timeout time.Duration) error {
 			Message: commit.Message,
 		}
 	}
+	defer func() {
+		if err := os.RemoveAll(rbi.GetCodeHome()); err != nil {
+			logrus.Warningf("remove source code: %v", err)
+		}
+	}()
+
 	hash := i.commit.Hash
 	if len(hash) >= 8 {
 		hash = i.commit.Hash[0:7]
@@ -194,9 +203,14 @@ func (i *SourceCodeBuildItem) Run(timeout time.Duration) error {
 		i.Lang = string(lang)
 	}
 
+	i.Logger.Info("pull code successfully", map[string]string{"step": "codee-version"})
 	res, err := i.codeBuild()
 	if err != nil {
-		i.Logger.Error("Build app version from source code failure,"+err.Error(), map[string]string{"step": "builder-exector", "status": "failure"})
+		if err.Error() == context.DeadlineExceeded.Error() {
+			i.Logger.Error("Build app version from source code timeout, the maximum time is 30 minutes", map[string]string{"step": "builder-exector", "status": "failure"})
+		} else {
+			i.Logger.Error("Build app version from source code failure,"+err.Error(), map[string]string{"step": "builder-exector", "status": "failure"})
+		}
 		return err
 	}
 	if err := i.UpdateBuildVersionInfo(res); err != nil {
@@ -210,6 +224,11 @@ func (i *SourceCodeBuildItem) codeBuild() (*build.Response, error) {
 	if err != nil {
 		logrus.Errorf("get code build error: %s lang %s", err.Error(), i.Lang)
 		i.Logger.Error(util.Translation("No way of compiling to support this source type was found"), map[string]string{"step": "builder-exector", "status": "failure"})
+		return nil, err
+	}
+	hostAlias, err := i.getHostAlias()
+	if err != nil {
+		i.Logger.Error(util.Translation("get rbd-repo ip failure"), map[string]string{"step": "builder-exector", "status": "failure"})
 		return nil, err
 	}
 	buildReq := &build.Request{
@@ -229,9 +248,44 @@ func (i *SourceCodeBuildItem) codeBuild() (*build.Response, error) {
 		BuildEnvs:     i.BuildEnvs,
 		Logger:        i.Logger,
 		DockerClient:  i.DockerClient,
+		KubeClient:    i.KubeClient,
+		HostAlias:     hostAlias,
+		Ctx:           i.Ctx,
+		GRDataPVCName: i.GRDataPVCName,
+		CachePVCName:  i.CachePVCName,
 	}
 	res, err := codeBuild.Build(buildReq)
 	return res, err
+}
+
+func (i *SourceCodeBuildItem) getExtraHosts() (extraHosts []string, err error) {
+	endpoints, err := i.KubeClient.CoreV1().Endpoints(i.RbdNamespace).Get(i.RbdRepoName, metav1.GetOptions{})
+	if err != nil {
+		logrus.Errorf("do not found ep by name: %s in namespace: %s", i.RbdRepoName, i.Namespace)
+		return nil, err
+	}
+	for _, subset := range endpoints.Subsets {
+		for _, addr := range subset.Addresses {
+			extraHosts = append(extraHosts, fmt.Sprintf("maven.goodrain.me:%s", addr.IP))
+			extraHosts = append(extraHosts, fmt.Sprintf("lang.goodrain.me:%s", addr.IP))
+		}
+	}
+	return
+}
+
+func (i *SourceCodeBuildItem) getHostAlias() (hostAliasList []build.HostAlias, err error) {
+	endpoints, err := i.KubeClient.CoreV1().Endpoints(i.RbdNamespace).Get(i.RbdRepoName, metav1.GetOptions{})
+	if err != nil {
+		logrus.Errorf("do not found ep by name: %s in namespace: %s", i.RbdRepoName, i.Namespace)
+		return nil, err
+	}
+	hostNames := []string{"maven.goodrain.me", "lang.goodrain.me"}
+	for _, subset := range endpoints.Subsets {
+		for _, addr := range subset.Addresses {
+			hostAliasList = append(hostAliasList, build.HostAlias{IP: addr.IP, Hostnames: hostNames})
+		}
+	}
+	return
 }
 
 //IsDockerfile CheckDockerfile
@@ -291,7 +345,7 @@ func (i *SourceCodeBuildItem) UpdateVersionInfo(vi *dbmodel.VersionInfo) error {
 	version.CommitMsg = vi.CommitMsg
 	version.Author = vi.Author
 	version.CodeVersion = vi.CodeVersion
-	logrus.Debugf("update app version %+v", *version)
+	version.CodeBranch = vi.CodeBranch
 	if err := db.GetManager().VersionInfoDao().UpdateModel(version); err != nil {
 		return err
 	}
@@ -306,9 +360,11 @@ func (i *SourceCodeBuildItem) UpdateBuildVersionInfo(res *build.Response) error 
 		EventID:       i.EventID,
 		ImageName:     builder.RUNNERIMAGENAME,
 		FinalStatus:   "success",
+		CodeBranch:    i.CodeSouceInfo.Branch,
 		CodeVersion:   i.commit.Hash,
 		CommitMsg:     i.commit.Message,
 		Author:        i.commit.Author,
+		FinishTime:    time.Now(),
 	}
 	if err := i.UpdateVersionInfo(vi); err != nil {
 		logrus.Errorf("update version info error: %s", err.Error())

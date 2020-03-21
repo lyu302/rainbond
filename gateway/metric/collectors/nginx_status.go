@@ -17,3 +17,22 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 package collectors
+
+import (
+	"github.com/goodrain/rainbond/gateway/controller/openresty/nginxcmd"
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+//NginxCmdMetric -
+type NginxCmdMetric struct {
+}
+
+//Describe -
+func (n *NginxCmdMetric) Describe(ch chan<- *prometheus.Desc) {
+	nginxcmd.PromethesuScrape(ch)
+}
+
+//Collect -
+func (n *NginxCmdMetric) Collect(ch chan<- prometheus.Metric) {
+	nginxcmd.PrometheusCollect(ch)
+}

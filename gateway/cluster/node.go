@@ -19,69 +19,49 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
 
-	"github.com/goodrain/rainbond/util"
-
 	"github.com/Sirupsen/logrus"
-
+	"github.com/coreos/etcd/clientv3"
 	"github.com/goodrain/rainbond/cmd/gateway/option"
 )
 
 //NodeManager node manager
 type NodeManager struct {
-	localV4Hosts  []net.IP
-	localV16Hosts []net.IP
-	config        option.Config
+	config    option.Config
+	ipManager IPManager
 }
 
 //CreateNodeManager create node manager
-func CreateNodeManager(config option.Config) (*NodeManager, error) {
+func CreateNodeManager(ctx context.Context, config option.Config, etcdcli *clientv3.Client) (*NodeManager, error) {
 	nm := &NodeManager{
 		config: config,
 	}
-	if err := nm.initLocalHost(); err != nil {
+	ipManager, err := CreateIPManager(ctx, config, etcdcli)
+	if err != nil {
 		return nil, err
 	}
-	if ok := nm.checkGatewayPort(); !ok {
-		return nil, fmt.Errorf("Check gateway node port failure")
-	}
+	nm.ipManager = ipManager
 	return nm, nil
 }
 
-func (n *NodeManager) initLocalHost() error {
-	tables, err := net.Interfaces()
-	if err != nil {
+// Start -
+func (n *NodeManager) Start() error {
+	if err := n.ipManager.Start(); err != nil {
 		return err
 	}
-	for _, t := range tables {
-		if n.config.EnableInterface != nil && len(n.config.EnableInterface) > 0 {
-			if ok := util.StringArrayContains(n.config.EnableInterface, t.Name); !ok {
-				continue
-			}
-		}
-		logrus.Infof("Network interface %s is enable manage by gateway", t.Name)
-		addrs, err := t.Addrs()
-		if err != nil {
-			return err
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			//ipnet.IP.IsLoopback()
-			if !ok {
-				continue
-			}
-			if ipv4 := ipnet.IP.To4(); ipv4 != nil {
-				n.localV4Hosts = append(n.localV4Hosts, ipnet.IP.To4())
-			}
-			if ipv16 := ipnet.IP.To16(); ipv16 != nil {
-				n.localV16Hosts = append(n.localV16Hosts, ipnet.IP.To16())
-			}
-		}
+	if ok := n.checkGatewayPort(); !ok {
+		return fmt.Errorf("Check gateway node port failure")
 	}
 	return nil
+}
+
+// Stop -
+func (n *NodeManager) Stop() {
+	n.ipManager.Stop()
 }
 
 func (n *NodeManager) checkGatewayPort() bool {
@@ -90,6 +70,7 @@ func (n *NodeManager) checkGatewayPort() bool {
 		uint32(n.config.ListenPorts.HTTP),
 		uint32(n.config.ListenPorts.HTTPS),
 		uint32(n.config.ListenPorts.Status),
+		uint32(n.config.ListenPorts.Stream),
 	}
 	return n.CheckPortAvailable("tcp", ports...)
 }
@@ -101,18 +82,16 @@ func (n *NodeManager) CheckPortAvailable(protocol string, ports ...uint32) bool 
 	}
 	timeout := time.Second * 3
 	for _, port := range ports {
-		for _, ip := range n.localV4Hosts {
-			c, _ := net.DialTimeout(protocol, fmt.Sprintf("%s:%d", ip.String(), port), timeout)
-			if c != nil {
-				logrus.Errorf("Gateway must need listen port %d, but it has been uesd.", port)
-				return false
-			}
+		c, _ := net.DialTimeout(protocol, fmt.Sprintf("0.0.0.0:%d", port), timeout)
+		if c != nil {
+			logrus.Errorf("Gateway must need listen port %d, but it has been uesd.", port)
+			return false
 		}
 	}
 	return true
 }
 
-//GetLocalV4IPs get current host all available IP
-func (n *NodeManager) GetLocalV4IPs() []net.IP {
-	return n.localV4Hosts
+//IPManager ip manager
+func (n *NodeManager) IPManager() IPManager {
+	return n.ipManager
 }

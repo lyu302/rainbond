@@ -19,15 +19,22 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/Sirupsen/logrus"
+	"github.com/go-chi/chi"
 	"github.com/goodrain/rainbond/api/handler"
 	"github.com/goodrain/rainbond/api/middleware"
 	"github.com/goodrain/rainbond/db"
 	"github.com/goodrain/rainbond/db/model"
 	httputil "github.com/goodrain/rainbond/util/http"
+	"github.com/goodrain/rainbond/worker/server"
 )
+
+// PodController is an implementation of PodInterface
+type PodController struct{}
 
 //Pods get some service pods
 // swagger:operation GET /v2/tenants/{tenant_name}/pods v2/tenants pods
@@ -61,8 +68,40 @@ func Pods(w http.ResponseWriter, r *http.Request) {
 	}
 	var allpods []*handler.K8sPodInfo
 	for _, serviceID := range serviceIDs {
-		pods, _ := handler.GetServiceManager().GetPods(serviceID)
-		allpods = append(allpods, pods...)
+		podinfo, err := handler.GetServiceManager().GetPods(serviceID)
+		if err != nil {
+			logrus.Errorf("get service pod failure %s", err.Error())
+			continue
+		}
+		if podinfo == nil {
+			continue
+		}
+		var pods []*handler.K8sPodInfo
+		if podinfo.OldPods != nil {
+			pods = append(podinfo.NewPods, podinfo.OldPods...)
+		} else {
+			pods = podinfo.NewPods
+		}
+		for _, pod := range pods {
+			allpods = append(allpods, pod)
+		}
 	}
 	httputil.ReturnSuccess(r, w, allpods)
+}
+
+// PodDetail -
+func (p *PodController) PodDetail(w http.ResponseWriter, r *http.Request) {
+	podName := chi.URLParam(r, "pod_name")
+	serviceID := r.Context().Value(middleware.ContextKey("service_id")).(string)
+	pd, err := handler.GetPodHandler().PodDetail(serviceID, podName)
+	if err != nil {
+		logrus.Errorf("error getting pod detail: %v", err)
+		if err == server.ErrPodNotFound {
+			httputil.ReturnError(r, w, 404, fmt.Sprintf("error getting pod detail: %v", err))
+			return
+		}
+		httputil.ReturnError(r, w, 500, fmt.Sprintf("error getting pod detail: %v", err))
+		return
+	}
+	httputil.ReturnSuccess(r, w, pd)
 }

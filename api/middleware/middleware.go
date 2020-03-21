@@ -21,20 +21,20 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"github.com/goodrain/rainbond/api/handler"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"strings"
 
-	"github.com/jinzhu/gorm"
-
-	"github.com/goodrain/rainbond/db"
-	"github.com/goodrain/rainbond/event"
-
-	httputil "github.com/goodrain/rainbond/util/http"
-
 	"github.com/Sirupsen/logrus"
 	"github.com/go-chi/chi"
+	"github.com/goodrain/rainbond/api/handler"
+	"github.com/goodrain/rainbond/api/util"
+	"github.com/goodrain/rainbond/db"
+	dbmodel "github.com/goodrain/rainbond/db/model"
+	"github.com/goodrain/rainbond/event"
+	httputil "github.com/goodrain/rainbond/util/http"
+	"github.com/jinzhu/gorm"
 )
 
 //ContextKey ctx key type
@@ -80,6 +80,7 @@ func InitTenant(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ContextKey("tenant_name"), tenantName)
 		ctx = context.WithValue(ctx, ContextKey("tenant_id"), tenant.UUID)
 		ctx = context.WithValue(ctx, ContextKey("tenant"), tenant)
+
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 	return http.HandlerFunc(fn)
@@ -201,4 +202,83 @@ func apiExclude(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+type resWriter struct {
+	origWriter http.ResponseWriter
+	statusCode int
+}
+
+func (w *resWriter) Header() http.Header {
+	return w.origWriter.Header()
+}
+func (w *resWriter) Write(p []byte) (int, error) {
+	return w.origWriter.Write(p)
+}
+func (w *resWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.origWriter.WriteHeader(statusCode)
+}
+
+// WrapEL wrap eventlog, handle event log before and after process
+func WrapEL(f http.HandlerFunc, target, optType string, synType int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			body, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				logrus.Warningf("error reading request body: %v", err)
+			} else {
+				logrus.Debugf("method: %s; uri: %s; body: %s", r.Method, r.RequestURI, string(body))
+			}
+			// set a new body, which will simulate the same data we read
+			r.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+			var targetID string
+			var ok bool
+			if targetID, ok = r.Context().Value(ContextKey("service_id")).(string); !ok {
+				var reqDataMap map[string]interface{}
+				if err = json.Unmarshal(body, &reqDataMap); err != nil {
+					httputil.ReturnError(r, w, 400, "操作对象未指定")
+					return
+				}
+
+				if targetID, ok = reqDataMap["service_id"].(string); !ok {
+					httputil.ReturnError(r, w, 400, "操作对象未指定")
+					return
+				}
+			}
+			//eventLog check the latest event
+
+			if !util.CanDoEvent(optType, synType, target, targetID) {
+				httputil.ReturnError(r, w, 409, "操作过于频繁，请稍后再试") // status code 409 conflict
+				return
+			}
+
+			// handle operator
+			var operator string
+			var reqData map[string]interface{}
+			if err = json.Unmarshal(body, &reqData); err == nil {
+				if operatorI, ok := reqData["operator"]; ok {
+					operator = operatorI.(string)
+				}
+			}
+
+			// tenantID can not null
+			tenantID := r.Context().Value(ContextKey("tenant_id")).(string)
+			var ctx context.Context
+
+			event, err := util.CreateEvent(target, optType, targetID, tenantID, string(body), operator, synType)
+			if err != nil {
+				logrus.Error("create event error : ", err)
+				httputil.ReturnError(r, w, 500, "操作失败")
+				return
+			}
+			ctx = context.WithValue(r.Context(), ContextKey("event"), event)
+			ctx = context.WithValue(ctx, ContextKey("event_id"), event.EventID)
+			rw := &resWriter{origWriter: w}
+			f(rw, r.WithContext(ctx))
+			if synType == dbmodel.SYNEVENTTYPE || (synType == dbmodel.ASYNEVENTTYPE && rw.statusCode >= 400) { // status code 2XX/3XX all equal to success
+				util.UpdateEvent(event.EventID, rw.statusCode)
+			}
+		}
+	}
 }

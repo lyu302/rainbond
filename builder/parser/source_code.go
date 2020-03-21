@@ -21,6 +21,7 @@ package parser
 import (
 	"fmt"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -210,9 +211,17 @@ func (d *SourceCodeParse) Parse() ParseErrorList {
 			return err
 		}
 	}
+	// The source code is useless after the test is completed, and needs to be deleted.
+	defer func() {
+		if sources.CheckFileExist(buildInfo.GetCodeHome()) {
+			if err := sources.RemoveDir(buildInfo.GetCodeHome()); err != nil {
+				logrus.Warningf("remove source code: %v", err)
+			}
+		}
+	}()
 
 	//read rainbondfile
-	rbdfileConfig, err := code.ReadRainbondFile(buildInfo.GetCodeHome())
+	rbdfileConfig, err := code.ReadRainbondFile(buildInfo.GetCodeBuildAbsPath())
 	if err != nil {
 		if err == code.ErrRainbondFileNotFound {
 			d.errappend(ErrorAndSolve(NegligibleError, "rainbondfile未定义", "可以参考文档说明配置此文件定义应用属性"))
@@ -290,10 +299,10 @@ func (d *SourceCodeParse) Parse() ParseErrorList {
 	m := multi.NewMultiServiceI(lang.String())
 	if m != nil {
 		logrus.Infof("Lang: %s; start listing multi modules", lang.String())
-		services, err := m.ListModules(buildInfo.GetCodeHome())
+		services, err := m.ListModules(buildInfo.GetCodeBuildAbsPath())
 		if err != nil {
 			d.logger.Error("解析多模块项目失败", map[string]string{"step": "parse"})
-			d.errappend(ErrorAndSolve(FatalError, "error listing modules", "check source code for multi-modules"))
+			d.errappend(ErrorAndSolve(FatalError, fmt.Sprintf("error listing modules: %v", err), "check source code for multi-modules"))
 			return d.errors
 		}
 		if services != nil && len(services) > 1 {
@@ -358,6 +367,12 @@ func (d *SourceCodeParse) Parse() ParseErrorList {
 		}
 		//handle profile port
 		for _, port := range rbdfileConfig.Ports {
+			if port.Port == 0 {
+				continue
+			}
+			if port.Protocol == "" {
+				port.Protocol = GetPortProtocol(port.Port)
+			}
 			d.ports[port.Port] = &types.Port{ContainerPort: port.Port, Protocol: port.Protocol}
 		}
 		if rbdfileConfig.Cmd != "" {
@@ -369,7 +384,7 @@ func (d *SourceCodeParse) Parse() ParseErrorList {
 
 //ReadRbdConfigAndLang read rainbondfile  and lang
 func ReadRbdConfigAndLang(buildInfo *sources.RepostoryBuildInfo) (*code.RainbondFileConfig, code.Lang, error) {
-	rbdfileConfig, err := code.ReadRainbondFile(buildInfo.GetCodeHome())
+	rbdfileConfig, err := code.ReadRainbondFile(buildInfo.GetCodeBuildAbsPath())
 	if err != nil {
 		return nil, code.NO, err
 	}
@@ -463,15 +478,16 @@ func (d *SourceCodeParse) GetLang() code.Lang {
 //GetServiceInfo 获取service info
 func (d *SourceCodeParse) GetServiceInfo() []ServiceInfo {
 	serviceInfo := ServiceInfo{
-		Ports:             d.GetPorts(),
-		Envs:              d.GetEnvs(),
-		Volumes:           d.GetVolumes(),
-		Image:             d.GetImage(),
-		Args:              d.GetArgs(),
-		Branchs:           d.GetBranchs(),
-		Memory:            d.memory,
-		Lang:              d.GetLang(),
-		ServiceDeployType: util.StatelessServiceType,
+		Ports:       d.GetPorts(),
+		Envs:        d.GetEnvs(),
+		Volumes:     d.GetVolumes(),
+		Image:       d.GetImage(),
+		Args:        d.GetArgs(),
+		Branchs:     d.GetBranchs(),
+		Memory:      d.memory,
+		Lang:        d.GetLang(),
+		ServiceType: model.ServiceTypeStatelessMultiple.String(),
+		OS:          runtime.GOOS,
 	}
 	var res []ServiceInfo
 	if d.isMulti && d.services != nil && len(d.services) > 0 {

@@ -21,14 +21,12 @@ package mysql
 import (
 	"sync"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/db/config"
 	"github.com/goodrain/rainbond/db/model"
-
-	"github.com/Sirupsen/logrus"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/mysql"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
-	_ "github.com/jinzhu/gorm/dialects/sqlite"
 )
 
 //Manager db manager
@@ -57,13 +55,6 @@ func CreateManager(config config.Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	if config.DBType == "sqlite3" {
-		var err error
-		db, err = gorm.Open("sqlite3", "test.db")
-		if err != nil {
-			return nil, err
-		}
-	}
 	manager := &Manager{
 		db:      db,
 		config:  config,
@@ -84,6 +75,16 @@ func (m *Manager) CloseManager() error {
 //Begin begin a transaction
 func (m *Manager) Begin() *gorm.DB {
 	return m.db.Begin()
+}
+
+// EnsureEndTransactionFunc -
+func (m *Manager) EnsureEndTransactionFunc() func(tx *gorm.DB) {
+	return func(tx *gorm.DB) {
+		if r := recover(); r != nil {
+			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+			tx.Rollback()
+		}
+	}
 }
 
 //Print Print
@@ -127,12 +128,17 @@ func (m *Manager) RegisterTableModel() {
 	m.models = append(m.models, &model.RuleExtension{})
 	m.models = append(m.models, &model.HTTPRule{})
 	m.models = append(m.models, &model.TCPRule{})
-	m.models = append(m.models, &model.IPPort{})
-	m.models = append(m.models, &model.IPPool{})
 	m.models = append(m.models, &model.TenantServiceConfigFile{})
 	m.models = append(m.models, &model.Endpoint{})
 	m.models = append(m.models, &model.ThirdPartySvcDiscoveryCfg{})
 	m.models = append(m.models, &model.GwRuleConfig{})
+
+	// volumeType
+	m.models = append(m.models, &model.TenantServiceVolumeType{})
+	// pod autoscaler
+	m.models = append(m.models, &model.TenantServiceAutoscalerRules{})
+	m.models = append(m.models, &model.TenantServiceAutoscalerRuleMetrics{})
+	m.models = append(m.models, &model.TenantServiceScalingRecords{})
 }
 
 //CheckTable check and create tables
@@ -166,5 +172,19 @@ func (m *Manager) CheckTable() {
 }
 
 func (m *Manager) patchTable() {
+	//modify tenant service env max size to 1024
+	if err := m.db.Exec("alter table tenant_services_envs modify column attr_value varchar(1024);").Error; err != nil {
+		logrus.Errorf("alter table tenant_services_envs error %s", err.Error())
+	}
 
+	if err := m.db.Exec("alter table tenant_services_event modify column request_body varchar(1024);").Error; err != nil {
+		logrus.Errorf("alter table tenant_services_envent error %s", err.Error())
+	}
+
+	if err := m.db.Exec("update gateway_tcp_rule set ip=? where ip=?", "0.0.0.0", "").Error; err != nil {
+		logrus.Errorf("update gateway_tcp_rule data error %s", err.Error())
+	}
+	if err := m.db.Exec("alter table tenant_services_volume modify column volume_type varchar(64);").Error; err != nil {
+		logrus.Errorf("alter table tenant_services_volume error: %s", err.Error())
+	}
 }

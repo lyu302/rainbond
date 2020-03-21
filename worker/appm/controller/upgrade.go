@@ -23,10 +23,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/goodrain/rainbond/worker/appm/f"
-
 	"github.com/Sirupsen/logrus"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/util"
+	"github.com/goodrain/rainbond/worker/appm/f"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
+	workerutil "github.com/goodrain/rainbond/worker/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,16 +48,16 @@ func (s *upgradeController) Begin() {
 		go func(service v1.AppService) {
 			wait.Add(1)
 			defer wait.Done()
-			service.Logger.Info("App runtime begin upgrade app service "+service.ServiceAlias, getLoggerOption("starting"))
+			service.Logger.Info("App runtime begin upgrade app service "+service.ServiceAlias, event.GetLoggerOption("starting"))
 			if err := s.upgradeOne(service); err != nil {
 				if err != ErrWaitTimeOut {
-					service.Logger.Error(fmt.Sprintf("upgrade service %s failure %s", service.ServiceAlias, err.Error()), GetCallbackLoggerOption())
+					service.Logger.Error(util.Translation("upgrade service error"), event.GetCallbackLoggerOption())
 					logrus.Errorf("upgrade service %s failure %s", service.ServiceAlias, err.Error())
 				} else {
-					service.Logger.Error(fmt.Sprintf("upgrade service timeout,please waiting it complete"), GetTimeoutLoggerOption())
+					service.Logger.Error(util.Translation("upgrade service timeout"), event.GetTimeoutLoggerOption())
 				}
 			} else {
-				service.Logger.Info(fmt.Sprintf("upgrade service %s success", service.ServiceAlias), GetLastLoggerOption())
+				service.Logger.Info(fmt.Sprintf("upgrade service %s success", service.ServiceAlias), event.GetLastLoggerOption())
 			}
 		}(service)
 	}
@@ -104,8 +106,8 @@ func (s *upgradeController) upgradeConfigMap(newapp v1.AppService) {
 
 func (s *upgradeController) upgradeService(newapp v1.AppService) {
 	nowApp := s.manager.store.GetAppService(newapp.ServiceID)
-	nowServices := nowApp.GetServices()
-	newService := newapp.GetServices()
+	nowServices := nowApp.GetServices(true)
+	newService := newapp.GetServices(true)
 	var nowServiceMaps = make(map[string]*corev1.Service, len(nowServices))
 	for i, now := range nowServices {
 		nowServiceMaps[now.Name] = nowServices[i]
@@ -141,6 +143,37 @@ func (s *upgradeController) upgradeService(newapp v1.AppService) {
 		}
 	}
 }
+func (s *upgradeController) upgradeClaim(newapp v1.AppService) {
+	nowApp := s.manager.store.GetAppService(newapp.ServiceID)
+	nowClaims := nowApp.GetClaims()
+	newClaims := newapp.GetClaims()
+	var nowClaimMaps = make(map[string]*corev1.PersistentVolumeClaim, len(nowClaims))
+	for i, now := range nowClaims {
+		nowClaimMaps[now.Name] = nowClaims[i]
+	}
+	for _, n := range newClaims {
+		if o, ok := nowClaimMaps[n.Name]; ok {
+			n.UID = o.UID
+			n.ResourceVersion = o.ResourceVersion
+			claim, err := s.manager.client.CoreV1().PersistentVolumeClaims(n.Namespace).Update(n)
+			if err != nil {
+				logrus.Errorf("update claim[%s] error: %s", n.GetName(), err.Error())
+				continue
+			}
+			nowApp.SetClaim(claim)
+			delete(nowClaimMaps, o.Name)
+			logrus.Debugf("ServiceID: %s; successfully update claim: %s", nowApp.ServiceID, n.Name)
+		} else {
+			claim, err := s.manager.client.CoreV1().PersistentVolumeClaims(n.Namespace).Create(n)
+			if err != nil {
+				logrus.Errorf("error create claim: %+v: err: %v", claim.GetName(), err)
+				continue
+			}
+			logrus.Debugf("ServiceID: %s; successfully create claim: %s", nowApp.ServiceID, claim.Name)
+			nowApp.SetClaim(claim)
+		}
+	}
+}
 
 func (s *upgradeController) upgradeOne(app v1.AppService) error {
 	//first: check and create namespace
@@ -154,17 +187,31 @@ func (s *upgradeController) upgradeOne(app v1.AppService) error {
 		}
 	}
 	s.upgradeConfigMap(app)
+
+	podDNSConfig := workerutil.MakePodDNSConfig(s.manager.client, app.TenantID, s.manager.rbdNamespace, s.manager.rbdDNSName)
+
 	if deployment := app.GetDeployment(); deployment != nil {
-		_, err := s.manager.client.AppsV1().Deployments(deployment.Namespace).Patch(deployment.Name, types.MergePatchType, app.UpgradePatch["deployment"])
+		if podDNSConfig != nil {
+			deployment.Spec.Template.Spec.DNSConfig = podDNSConfig
+			deployment.Spec.Template.Spec.DNSPolicy = "None"
+		}
+
+		_, err = s.manager.client.AppsV1().Deployments(deployment.Namespace).Patch(deployment.Name, types.MergePatchType, app.UpgradePatch["deployment"])
 		if err != nil {
-			app.Logger.Error(fmt.Sprintf("upgrade deployment %s failure %s", app.ServiceAlias, err.Error()), getLoggerOption("failure"))
+			app.Logger.Error(fmt.Sprintf("upgrade deployment %s failure %s", app.ServiceAlias, err.Error()), event.GetLoggerOption("failure"))
 			return fmt.Errorf("upgrade deployment %s failure %s", app.ServiceAlias, err.Error())
 		}
 	}
 	if statefulset := app.GetStatefulSet(); statefulset != nil {
-		_, err := s.manager.client.AppsV1().StatefulSets(statefulset.Namespace).Patch(statefulset.Name, types.MergePatchType, app.UpgradePatch["statefulset"])
+		if podDNSConfig != nil {
+			statefulset.Spec.Template.Spec.DNSConfig = podDNSConfig
+			statefulset.Spec.Template.Spec.DNSPolicy = "None"
+		}
+
+		_, err = s.manager.client.AppsV1().StatefulSets(statefulset.Namespace).Patch(statefulset.Name, types.MergePatchType, app.UpgradePatch["statefulset"])
 		if err != nil {
-			app.Logger.Error(fmt.Sprintf("upgrade statefulset %s failure %s", app.ServiceAlias, err.Error()), getLoggerOption("failure"))
+			logrus.Errorf("patch statefulset error : %s", err.Error())
+			app.Logger.Error(fmt.Sprintf("upgrade statefulset %s failure %s", app.ServiceAlias, err.Error()), event.GetLoggerOption("failure"))
 			return fmt.Errorf("upgrade statefulset %s failure %s", app.ServiceAlias, err.Error())
 		}
 	}
@@ -176,8 +223,8 @@ func (s *upgradeController) upgradeOne(app v1.AppService) error {
 		logrus.Warning(msg)
 		return nil
 	}
-	_ = f.UpgradeSecrets(s.manager.client, &app, oldApp.GetSecrets(), app.GetSecrets(), handleErr)
-	_ = f.UpgradeIngress(s.manager.client, &app, oldApp.GetIngress(), app.GetIngress(), handleErr)
+	_ = f.UpgradeSecrets(s.manager.client, &app, oldApp.GetSecrets(true), app.GetSecrets(true), handleErr)
+	_ = f.UpgradeIngress(s.manager.client, &app, oldApp.GetIngress(true), app.GetIngress(true), handleErr)
 
 	return s.WaitingReady(app)
 }

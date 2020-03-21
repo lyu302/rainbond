@@ -28,6 +28,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"path"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/api/model"
@@ -47,7 +48,6 @@ var AllTenant string
 type Region interface {
 	Tenants(name string) TenantInterface
 	Resources() ResourcesInterface
-	Tasks() TaskInterface
 	Nodes() NodeInterface
 	Cluster() ClusterInterface
 	Configs() ConfigsInterface
@@ -70,13 +70,12 @@ type APIConf struct {
 type serviceInfo struct {
 	ServicesAlias string `json:"serviceAlias"`
 	TenantName    string `json:"tenantName"`
-	ServiceId     string `json:"serviceId"`
-	TenantId      string `json:"tenantId"`
+	ServiceID     string `json:"serviceId"`
+	TenantID      string `json:"tenantId"`
 }
 
 type podInfo struct {
-	ServiceID string `json:"service_id"`
-	//部署资源的ID ,例如rc ,deploment, statefulset
+	ServiceID       string                       `json:"service_id"`
 	ReplicationID   string                       `json:"rc_id"`
 	ReplicationType string                       `json:"rc_type"`
 	PodName         string                       `json:"pod_name"`
@@ -98,7 +97,6 @@ func NewRegion(c APIConf) (Region, error) {
 				return nil, err
 			}
 			pool.AppendCertsFromPEM(caCrt)
-
 			cliCrt, err := tls.LoadX509KeyPair(c.Cert, c.CertKey)
 			if err != nil {
 				logrus.Errorf("Loadx509keypair err: %s", err)
@@ -112,6 +110,7 @@ func NewRegion(c APIConf) (Region, error) {
 			}
 			re.Client = &http.Client{
 				Transport: tr,
+				Timeout:   15 * time.Second,
 			}
 		} else {
 			re.Client = http.DefaultClient
@@ -258,7 +257,10 @@ func (r *resourcesTenant) Get() (*model.TenantResource, *util.APIHandleError) {
 
 func handleAPIResult(code int, res utilhttp.ResponseBody) *util.APIHandleError {
 	if code >= 300 {
-		return util.CreateAPIHandleErrorf(code, res.Msg)
+		if res.ValidationError != nil && len(res.ValidationError) > 0 {
+			return util.CreateAPIHandleErrorf(code, "msg:%s \napi validation_error: %+v", res.Msg, res.ValidationError)
+		}
+		return util.CreateAPIHandleErrorf(code, "msg:%s", res.Msg)
 	}
 	return nil
 }

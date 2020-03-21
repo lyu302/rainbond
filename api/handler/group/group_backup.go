@@ -28,6 +28,9 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/clientv3"
+	"github.com/jinzhu/gorm"
+	"github.com/pquerna/ffjson/ffjson"
+
 	"github.com/goodrain/rainbond/api/util"
 	"github.com/goodrain/rainbond/db"
 	dbmodel "github.com/goodrain/rainbond/db/model"
@@ -36,8 +39,6 @@ import (
 	core_util "github.com/goodrain/rainbond/util"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
 	"github.com/goodrain/rainbond/worker/client"
-	"github.com/jinzhu/gorm"
-	"github.com/pquerna/ffjson/ffjson"
 )
 
 //Backup GroupBackup
@@ -51,24 +52,19 @@ type Backup struct {
 		GroupID    string   `json:"group_id" validate:"group_name|required"`
 		Metadata   string   `json:"metadata,omitempty" validate:"metadata|required"`
 		ServiceIDs []string `json:"service_ids" validate:"service_ids|required"`
-		Mode       string   `json:"mode" validate:"mode|required|in:full-online,full-offline"`
 		Version    string   `json:"version" validate:"version|required"`
-		SlugInfo   struct {
-			Namespace   string `json:"namespace"`
-			FTPHost     string `json:"ftp_host"`
-			FTPPort     string `json:"ftp_port"`
-			FTPUser     string `json:"ftp_username"`
-			FTPPassword string `json:"ftp_password"`
-		} `json:"slug_info,omitempty"`
-		ImageInfo struct {
-			HubURL      string `json:"hub_url"`
-			HubUser     string `json:"hub_user"`
-			HubPassword string `json:"hub_password"`
-			Namespace   string `json:"namespace"`
-			IsTrust     bool   `json:"is_trust,omitempty"`
-		} `json:"image_info,omitempty"`
-		SourceDir string `json:"source_dir"`
-		BackupID  string `json:"backup_id,omitempty"`
+		SourceDir  string   `json:"source_dir"`
+		BackupID   string   `json:"backup_id,omitempty"`
+
+		Mode     string `json:"mode" validate:"mode|required|in:full-online,full-offline"`
+		Force    bool   `json:"force"`
+		S3Config struct {
+			Provider   string `json:"provider"`
+			Endpoint   string `json:"endpoint"`
+			AccessKey  string `json:"access_key"`
+			SecretKey  string `json:"secret_key"`
+			BucketName string `json:"bucket_name"`
+		} `json:"s3_config"`
 	}
 }
 
@@ -111,9 +107,11 @@ func (h *BackupHandle) NewBackup(b Backup) (*dbmodel.AppBackup, *util.APIHandleE
 	b.Body.SourceDir = sourceDir
 	appBackup.SourceDir = sourceDir
 	//snapshot the app metadata of region and write
-	if err := h.snapshot(b.Body.ServiceIDs, sourceDir); err != nil {
-		os.RemoveAll(sourceDir)
-		if strings.HasPrefix(err.Error(), "Statefulset app must be closed") {
+	if err := h.snapshot(b.Body.ServiceIDs, sourceDir, b.Body.Force); err != nil {
+		if err := os.RemoveAll(sourceDir); err != nil {
+			logrus.Warningf("error removing %s: %v", sourceDir, err)
+		}
+		if strings.HasPrefix(err.Error(), "state app must be closed before backup") {
 			return nil, util.CreateAPIHandleError(401, fmt.Errorf("snapshot group apps error,%s", err))
 		}
 		return nil, util.CreateAPIHandleError(500, fmt.Errorf("snapshot group apps error,%s", err))
@@ -154,21 +152,29 @@ func (h *BackupHandle) GetBackup(backupID string) (*dbmodel.AppBackup, *util.API
 }
 
 //DeleteBackup delete backup
-func (h *BackupHandle) DeleteBackup(backupID string) *util.APIHandleError {
-	backup, err := h.GetBackup(backupID)
+func (h *BackupHandle) DeleteBackup(backupID string) error {
+	backup, err := db.GetManager().AppBackupDao().GetAppBackup(backupID)
 	if err != nil {
 		return err
 	}
-	//if status != success it could be deleted
-	//if status == success, backup mode must be offline could be deleted
-	if backup.Status != "success" || backup.BackupMode == "full-offline" {
-		backup.Deleted = true
-		if er := db.GetManager().AppBackupDao().UpdateModel(backup); er != nil {
-			return util.CreateAPIHandleErrorFromDBError("delete backup error", er)
-		}
-		return nil
+
+	tx := db.GetManager().Begin()
+	defer db.GetManager().EnsureEndTransactionFunc()(tx)
+
+	if err := db.GetManager().AppBackupDaoTransactions(tx).DeleteAppBackup(backupID); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("delete backup error: %v", err)
 	}
-	return util.CreateAPIHandleErrorf(400, "backup success do not support delete.")
+
+	if backup.BackupMode == "full-offline" {
+		logrus.Infof("delete from local: %s", backup.SourceDir)
+		if err := os.RemoveAll(backup.SourceDir); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("remove backup directory: %v", err)
+		}
+	}
+
+	return tx.Commit().Error
 }
 
 //GetBackupByGroupID get some backup info by group id
@@ -180,6 +186,13 @@ func (h *BackupHandle) GetBackupByGroupID(groupID string) ([]*dbmodel.AppBackup,
 	return backups, nil
 }
 
+// AppSnapshot holds a snapshot of your app
+type AppSnapshot struct {
+	Services            []*RegionServiceSnapshot
+	Plugins             []*dbmodel.TenantPlugin
+	PluginBuildVersions []*dbmodel.TenantPluginBuildVersion
+}
+
 //RegionServiceSnapshot RegionServiceSnapshot
 type RegionServiceSnapshot struct {
 	ServiceID          string
@@ -189,18 +202,22 @@ type RegionServiceSnapshot struct {
 	ServiceEnv         []*dbmodel.TenantServiceEnvVar
 	ServiceLabel       []*dbmodel.TenantServiceLable
 	ServiceMntRelation []*dbmodel.TenantServiceMountRelation
-	PluginRelation     []*dbmodel.TenantServicePluginRelation
 	ServiceRelation    []*dbmodel.TenantServiceRelation
 	ServiceStatus      string
 	ServiceVolume      []*dbmodel.TenantServiceVolume
 	ServicePort        []*dbmodel.TenantServicesPort
 	Versions           []*dbmodel.VersionInfo
-	PluginConfigs      []*dbmodel.TenantPluginVersionDiscoverConfig
+
+	PluginRelation    []*dbmodel.TenantServicePluginRelation
+	PluginConfigs     []*dbmodel.TenantPluginVersionDiscoverConfig
+	PluginEnvs        []*dbmodel.TenantPluginVersionEnv
+	PluginStreamPorts []*dbmodel.TenantServicesStreamPluginPort
 }
 
 //snapshot
-func (h *BackupHandle) snapshot(ids []string, sourceDir string) error {
-	var datas []RegionServiceSnapshot
+func (h *BackupHandle) snapshot(ids []string, sourceDir string, force bool) error {
+	var pluginIDs []string
+	var services []*RegionServiceSnapshot
 	for _, id := range ids {
 		service, err := db.GetManager().TenantServiceDao().GetServiceByID(id)
 		if err != nil {
@@ -210,16 +227,13 @@ func (h *BackupHandle) snapshot(ids []string, sourceDir string) error {
 			//TODO: support thirdpart service backup and restore
 			continue
 		}
-		var data = RegionServiceSnapshot{
+		data := &RegionServiceSnapshot{
 			ServiceID: id,
 		}
 		status := h.statusCli.GetStatus(id)
-		serviceType, err := db.GetManager().TenantServiceLabelDao().GetTenantServiceTypeLabel(id)
-		if err != nil {
-			return fmt.Errorf("Get service deploy type error,%s", err.Error())
-		}
-		if status != v1.CLOSED && serviceType != nil && serviceType.LabelValue == core_util.StatefulServiceType {
-			return fmt.Errorf("Statefulset app must be closed before backup,%s", err.Error())
+		logrus.Debugf("service: %s is state: %v", service.ServiceAlias, service.IsState())
+		if !force && status != v1.CLOSED && service.IsState() { // state running service force backup
+			return fmt.Errorf("state app must be closed before backup")
 		}
 		data.ServiceStatus = status
 		data.Service = service
@@ -248,11 +262,6 @@ func (h *BackupHandle) snapshot(ids []string, sourceDir string) error {
 			return fmt.Errorf("Get service(%s) mnt relations error %s", id, err)
 		}
 		data.ServiceMntRelation = serviceMntRelations
-		servicePlugins, err := db.GetManager().TenantServicePluginRelationDao().GetALLRelationByServiceID(id)
-		if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
-			return fmt.Errorf("Get service(%s) plugins error %s", id, err)
-		}
-		data.PluginRelation = servicePlugins
 		serviceRelations, err := db.GetManager().TenantServiceRelationDao().GetTenantServiceRelations(id)
 		if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
 			return fmt.Errorf("Get service(%s) relations error %s", id, err)
@@ -272,15 +281,57 @@ func (h *BackupHandle) snapshot(ids []string, sourceDir string) error {
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return fmt.Errorf("Get service(%s) build versions error %s", id, err)
 		}
-		data.Versions = []*dbmodel.VersionInfo{version}
+		if version != nil {
+			logrus.Debugf("service: %s do have build version", service.ServiceAlias)
+			data.Versions = []*dbmodel.VersionInfo{version}
+		}
+
+		pluginReations, err := db.GetManager().TenantServicePluginRelationDao().GetALLRelationByServiceID(id)
+		if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
+			return fmt.Errorf("Get service(%s) plugins error %s", id, err)
+		}
+		data.PluginRelation = pluginReations
+		for _, pr := range pluginReations {
+			pluginIDs = append(pluginIDs, pr.PluginID)
+		}
 		pluginConfigs, err := db.GetManager().TenantPluginVersionConfigDao().GetPluginConfigs(id)
 		if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
 			return fmt.Errorf("Get service(%s) plugin configs error %s", id, err)
 		}
 		data.PluginConfigs = pluginConfigs
-		datas = append(datas, data)
+		pluginEnvs, err := db.GetManager().TenantPluginVersionENVDao().ListByServiceID(id)
+		if err != nil {
+			return fmt.Errorf("service id: %s; failed to list plugin envs: %v", id, err)
+		}
+		data.PluginEnvs = pluginEnvs
+		pluginStreamPorts, err := db.GetManager().TenantServicesStreamPluginPortDao().ListByServiceID(id)
+		if err != nil {
+			return fmt.Errorf("service id: %s; failed to list stream plugin ports: %v", id, err)
+		}
+		data.PluginStreamPorts = pluginStreamPorts
+
+		services = append(services, data)
 	}
-	body, err := ffjson.Marshal(datas)
+	logrus.Debug("service information ok.")
+
+	appSnapshot := &AppSnapshot{
+		Services: services,
+	}
+	// plugin
+	plugins, err := db.GetManager().TenantPluginDao().ListByIDs(pluginIDs)
+	if err != nil {
+		return fmt.Errorf("failed to list plugins: %v", err)
+	}
+	appSnapshot.Plugins = plugins
+	logrus.Debug("plugins ok.")
+	pluginVersions, err := db.GetManager().TenantPluginBuildVersionDao().ListSuccessfulOnesByPluginIDs(pluginIDs)
+	if err != nil {
+		return fmt.Errorf("failed to list successful plugin build versions: %v", err)
+	}
+	appSnapshot.PluginBuildVersions = pluginVersions
+	logrus.Debug("plugin versions ok.")
+
+	body, err := ffjson.Marshal(appSnapshot)
 	if err != nil {
 		return err
 	}
@@ -295,20 +346,6 @@ func (h *BackupHandle) snapshot(ids []string, sourceDir string) error {
 type BackupRestore struct {
 	BackupID string `json:"backup_id"`
 	Body     struct {
-		SlugInfo struct {
-			Namespace   string `json:"namespace"`
-			FTPHost     string `json:"ftp_host"`
-			FTPPort     string `json:"ftp_port"`
-			FTPUser     string `json:"ftp_username"`
-			FTPPassword string `json:"ftp_password"`
-		} `json:"slug_info,omitempty"`
-		ImageInfo struct {
-			HubURL      string `json:"hub_url"`
-			HubUser     string `json:"hub_user"`
-			HubPassword string `json:"hub_password"`
-			Namespace   string `json:"namespace"`
-			IsTrust     bool   `json:"is_trust,omitempty"`
-		} `json:"image_info,omitempty"`
 		EventID string `json:"event_id"`
 		//need restore target tenant id
 		TenantID string `json:"tenant_id"`
@@ -316,6 +353,14 @@ type BackupRestore struct {
 		//RestoreMode(cdot) current datacenter and other tenant
 		//RestoreMode(od)     other datacenter
 		RestoreMode string `json:"restore_mode"`
+
+		S3Config struct {
+			Provider   string `json:"provider"`
+			Endpoint   string `json:"endpoint"`
+			AccessKey  string `json:"access_key"`
+			SecretKey  string `json:"secret_key"`
+			BucketName string `json:"bucket_name"`
+		} `json:"s3_config"`
 	}
 }
 
@@ -358,12 +403,11 @@ func (h *BackupHandle) RestoreBackup(br BackupRestore) (*RestoreResult, *util.AP
 	}
 	restoreID = core_util.NewUUID()
 	var dataMap = map[string]interface{}{
-		"slug_info":    br.Body.SlugInfo,
-		"image_info":   br.Body.ImageInfo,
 		"backup_id":    backup.BackupID,
 		"tenant_id":    br.Body.TenantID,
 		"restore_id":   restoreID,
 		"restore_mode": br.Body.RestoreMode,
+		"s3_config":    br.Body.S3Config,
 	}
 	err := h.mqcli.SendBuilderTopic(mqclient.TaskStruct{
 		TaskBody: dataMap,
@@ -430,7 +474,7 @@ type BackupCopy struct {
 		SourceDir  string `json:"source_dir" validate:"source_dir|required"`
 		SourceType string ` json:"source_type" validate:"source_type|required"`
 		BackupMode string `json:"backup_mode" validate:"backup_mode|required"`
-		BuckupSize int    `json:"backup_size" validate:"backup_size|required"`
+		BuckupSize int64  `json:"backup_size" validate:"backup_size|required"`
 	}
 }
 

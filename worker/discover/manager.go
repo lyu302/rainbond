@@ -29,9 +29,11 @@ import (
 	"github.com/goodrain/rainbond/cmd/worker/option"
 	"github.com/goodrain/rainbond/mq/api/grpc/pb"
 	"github.com/goodrain/rainbond/mq/client"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 	"github.com/goodrain/rainbond/worker/appm/controller"
 	"github.com/goodrain/rainbond/worker/appm/store"
 	"github.com/goodrain/rainbond/worker/discover/model"
+	"github.com/goodrain/rainbond/worker/gc"
 	"github.com/goodrain/rainbond/worker/handle"
 	grpc1 "google.golang.org/grpc"
 )
@@ -54,25 +56,33 @@ type TaskManager struct {
 }
 
 //NewTaskManager return *TaskManager
-func NewTaskManager(c option.Config,
+func NewTaskManager(cfg option.Config,
 	store store.Storer,
 	controllermanager *controller.Manager,
+	garbageCollector *gc.GarbageCollector,
 	startCh *channels.RingChannel) *TaskManager {
+
 	ctx, cancel := context.WithCancel(context.Background())
-	handleManager := handle.NewManager(ctx, c, store, controllermanager, startCh)
+	handleManager := handle.NewManager(ctx, cfg, store, controllermanager, garbageCollector, startCh)
 	healthStatus["status"] = "health"
 	healthStatus["info"] = "worker service health"
 	return &TaskManager{
 		ctx:           ctx,
 		cancel:        cancel,
-		config:        c,
+		config:        cfg,
 		handleManager: handleManager,
 	}
 }
 
 //Start 启动
 func (t *TaskManager) Start() error {
-	client, err := client.NewMqClient(t.config.EtcdEndPoints, t.config.MQAPI)
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: t.config.EtcdEndPoints,
+		CaFile:    t.config.EtcdCaFile,
+		CertFile:  t.config.EtcdCertFile,
+		KeyFile:   t.config.EtcdKeyFile,
+	}
+	client, err := client.NewMqClient(etcdClientArgs, t.config.MQAPI)
 	if err != nil {
 		logrus.Errorf("new Mq client error, %v", err)
 		healthStatus["status"] = "unusual"
@@ -122,8 +132,10 @@ func (t *TaskManager) Do() {
 			}
 			rc := t.handleManager.AnalystToExec(transData)
 			if rc != nil && rc != handle.ErrCallback {
+				logrus.Warningf("execute task: %v", rc)
 				TaskError++
 			} else if rc != nil && rc == handle.ErrCallback {
+				logrus.Errorf("err callback; analyst to exet: %v", rc)
 				ctx, cancel := context.WithCancel(t.ctx)
 				reply, err := t.client.Enqueue(ctx, &pb.EnqueueRequest{
 					Topic:   client.WorkerTopic,

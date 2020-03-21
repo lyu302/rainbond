@@ -27,6 +27,7 @@ import (
 	"github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/event"
 	"github.com/goodrain/rainbond/util"
+	"runtime"
 	"strconv"
 	"strings" //"github.com/docker/docker/client"
 )
@@ -38,7 +39,7 @@ type DockerRunOrImageParse struct {
 	volumes      map[string]*types.Volume
 	envs         map[string]*types.Env
 	source       string
-	deployType   string
+	serviceType  string
 	memory       int
 	image        Image
 	args         []string
@@ -48,7 +49,7 @@ type DockerRunOrImageParse struct {
 }
 
 //CreateDockerRunOrImageParse create parser
-func CreateDockerRunOrImageParse(user, pass, source string, dockerclient *client.Client, logger event.Logger) Parser {
+func CreateDockerRunOrImageParse(user, pass, source string, dockerclient *client.Client, logger event.Logger) *DockerRunOrImageParse {
 	source = strings.TrimLeft(source, " ")
 	source = strings.Replace(source, "\n", "", -1)
 	source = strings.Replace(source, "\\", "", -1)
@@ -74,7 +75,7 @@ func (d *DockerRunOrImageParse) Parse() ParseErrorList {
 	}
 	//docker run
 	if strings.HasPrefix(d.source, "docker") {
-		d.dockerun(strings.Split(d.source, " "))
+		d.ParseDockerun(strings.Split(d.source, " "))
 		if d.image.String() == "" || d.image.String() == ":" {
 			d.errappend(ErrorAndSolve(FatalError, fmt.Sprintf("镜像名称识别失败"), SolveAdvice("modify_image", "请确认输入DockerRun命令是否正确")))
 			return d.errors
@@ -133,11 +134,12 @@ func (d *DockerRunOrImageParse) Parse() ParseErrorList {
 			}
 		}
 	}
-	d.deployType = DetermineDeployType(d.image)
+	d.serviceType = DetermineDeployType(d.image)
 	return d.errors
 }
 
-func (d *DockerRunOrImageParse) dockerun(source []string) {
+//ParseDockerun parse docker run command
+func (d *DockerRunOrImageParse) ParseDockerun(source []string) {
 	var name string
 	source = util.RemoveSpaces(source)
 	for i, s := range source {
@@ -266,14 +268,15 @@ func (d *DockerRunOrImageParse) GetMemory() int {
 //GetServiceInfo 获取service info
 func (d *DockerRunOrImageParse) GetServiceInfo() []ServiceInfo {
 	serviceInfo := ServiceInfo{
-		Ports:             d.GetPorts(),
-		Envs:              d.GetEnvs(),
-		Volumes:           d.GetVolumes(),
-		Image:             d.GetImage(),
-		Args:              d.GetArgs(),
-		Branchs:           d.GetBranchs(),
-		Memory:            d.memory,
-		ServiceDeployType: d.deployType,
+		Ports:       d.GetPorts(),
+		Envs:        d.GetEnvs(),
+		Volumes:     d.GetVolumes(),
+		Image:       d.GetImage(),
+		Args:        d.GetArgs(),
+		Branchs:     d.GetBranchs(),
+		Memory:      d.memory,
+		ServiceType: d.serviceType,
+		OS:          runtime.GOOS,
 	}
 	if serviceInfo.Memory == 0 {
 		serviceInfo.Memory = 512

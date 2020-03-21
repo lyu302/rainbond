@@ -9,13 +9,14 @@ if [ $BUILD_IMAGE_BASE_NAME ];
 then 
 IMAGE_BASE_NAME=${BUILD_IMAGE_BASE_NAME}
 fi
-GO_VERSION=1.11
-GATEWAY_GO_VERSION=1.11-alpine3.8
+
+GO_VERSION=1.13
+GATEWAY_GO_VERSION=1.13-alpine
 
 if [ -z "$VERSION" ];then
   if [ -z "$TRAVIS_TAG" ]; then
     if [ -z "$TRAVIS_BRANCH" ]; then
-      VERSION=V5.1-dev
+      VERSION=V5.2-dev
     else
       VERSION=$TRAVIS_BRANCH-dev
     fi
@@ -38,9 +39,9 @@ build::node() {
 	case $1 in
 		node)
 			echo "build node"
-			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/node ./cmd/node
+			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc} -X github.com/goodrain/rainbond/util/license.enterprise=${ENTERPRISE}"  -o $releasedir/dist/usr/local/bin/node ./cmd/node
 		;;
-		grctl)	
+		grctl)
 			echo "build grctl"
 			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/grctl ./cmd/grctl
 		;;
@@ -50,9 +51,14 @@ build::node() {
 		;;
 		*)
 			echo "build node"
-			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/node ./cmd/node
-			echo "build grctl"
-			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/grctl ./cmd/grctl
+			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc} -X github.com/goodrain/rainbond/util/license.enterprise=${ENTERPRISE}"  -o $releasedir/dist/usr/local/bin/node ./cmd/node
+			if [ "${ENTERPRISE}" = "true" ];then
+        echo "build grctl enterprise"
+        docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc} -X github.com/goodrain/rainbond/util/license.enterprise=${ENTERPRISE}"  -o $releasedir/dist/usr/local/bin/grctl ./cmd/grctl
+      else
+        echo "build grctl"
+			  docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/grctl ./cmd/grctl
+      fi
 			echo "build certutil"
 			docker run --rm -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o $releasedir/dist/usr/local/bin/grcert ./cmd/certutil
 			pushd $distdir
@@ -64,7 +70,7 @@ COPY pkg.tgz /
 EOF
 			docker build -t ${BASE_NAME}/cni:rbd_$VERSION .
 			if [ "$1" = "push" ];then
-				docker push ${BASE_NAME}/cni:rbd_$VERSION 
+				docker push ${BASE_NAME}/cni:rbd_$VERSION
 			fi
 			popd
 		;;
@@ -86,7 +92,12 @@ build::binary() {
 	elif [ "$1" = "gateway" ];then
 		docker run --rm -e GOOS=${GOOS} -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GATEWAY_GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${OUTPATH} ./cmd/$1
 	else
-		docker run --rm -e GOOS=${GOOS} -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${OUTPATH} ./cmd/$1
+		if [ "${ENTERPRISE}" = "true" ];then	
+			echo "---> ENTERPRISE:${ENTERPRISE}"
+			docker run --rm -e GOOS=${GOOS} -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc} -X github.com/goodrain/rainbond/util/license.enterprise=${ENTERPRISE}"  -o ${OUTPATH} ./cmd/$1
+		else
+			docker run --rm -e GOOS=${GOOS} -v `pwd`:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${OUTPATH} ./cmd/$1
+		fi
 	fi
 	if [ "$GOOS" = "windows" ];then
 	    mv $OUTPATH  ${OUTPATH}.exe
@@ -95,29 +106,40 @@ build::binary() {
 
 build::image() {
 	local REPO_PATH="$PWD"
-	pushd ./hack/contrib/docker/$1
+	pushd "./hack/contrib/docker/$1"
 		echo "---> build binary:$1"
 		local DOCKER_PATH="./hack/contrib/docker/$1"
 		if [ "$1" = "eventlog" ];then
 			docker build -t goodraim.me/event-build:v1 build
-			docker run --rm -v ${REPO_PATH}:${WORK_DIR} -w ${WORK_DIR} goodraim.me/event-build:v1 go build  -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/eventlog
+			docker run --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} goodraim.me/event-build:v1 go build  -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/eventlog
 		elif [ "$1" = "chaos" ];then
-			docker run --rm -v ${REPO_PATH}:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/builder
+			docker run --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/builder
 		elif [ "$1" = "monitor" ];then
-			docker run --rm -v ${REPO_PATH}:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -extldflags '-static' -X github.com/goodrain/rainbond/cmd.version=${release_desc}" -tags 'netgo static_build' -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
+			docker run -e CGO_ENABLED=0 --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
 		elif [ "$1" = "gateway" ];then
-			docker run --rm -v ${REPO_PATH}:${WORK_DIR} -w ${WORK_DIR} -it golang:${GATEWAY_GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
+			docker run --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} -it golang:${GATEWAY_GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
 		elif [ "$1" = "mesh-data-panel" ];then
 			echo "mesh-data-panel not need build";
 		else
-			docker run --rm -v ${REPO_PATH}:${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
+			if [ "${ENTERPRISE}" = "true" ];then
+				echo "---> ENTERPRISE:${ENTERPRISE}"
+				docker run --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc} -X github.com/goodrain/rainbond/util/license.enterprise=${ENTERPRISE}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
+			else
+				docker run --rm -v "${REPO_PATH}":${WORK_DIR} -w ${WORK_DIR} -it golang:${GO_VERSION} go build -ldflags "-w -s -X github.com/goodrain/rainbond/cmd.version=${release_desc}"  -o ${DOCKER_PATH}/${BASE_NAME}-$1 ./cmd/$1
+			fi
 		fi
 		echo "---> build image:$1"
 		sed "s/__RELEASE_DESC__/${release_desc}/" Dockerfile > Dockerfile.release
-		docker build -t ${IMAGE_BASE_NAME}/rbd-$1:${VERSION} -f Dockerfile.release .
+		docker build -t "${IMAGE_BASE_NAME}/rbd-$1:${VERSION}" -f Dockerfile.release .
 		if [ "$2" = "push" ];then
-		    docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
-			docker push ${IMAGE_BASE_NAME}/rbd-$1:${VERSION}
+		    docker login -u "$DOCKER_USERNAME" -p "$DOCKER_PASSWORD"
+			docker push "${IMAGE_BASE_NAME}/rbd-$1:${VERSION}"
+			if [ ${DOMESTIC_BASE_NAME} ];
+			then
+				docker tag "${IMAGE_BASE_NAME}/rbd-$1:${VERSION}" "${DOMESTIC_BASE_NAME}/${DOMESTIC_NAMESPACE}/rbd-$1:${VERSION}"
+				docker login -u "$DOMESTIC_DOCKER_USERNAME" -p "$DOMESTIC_DOCKER_PASSWORD" ${DOMESTIC_BASE_NAME}
+				docker push "${DOMESTIC_BASE_NAME}/${DOMESTIC_NAMESPACE}/rbd-$1:${VERSION}"
+			fi
 		fi	
 		rm -f ./Dockerfile.release
 		rm -f ./${BASE_NAME}-$1
@@ -125,22 +147,18 @@ build::image() {
 }
 
 build::all(){
-	local build_items=(api chaos gateway monitor mq webcli worker eventlog init-probe mesh-data-panel)
-	for item in ${build_items[@]}
+	local build_items=(api chaos gateway monitor mq webcli worker eventlog init-probe mesh-data-panel grctl node)
+	for item in "${build_items[@]}"
 	do
-		build::image $item $1
+		build::image "$item" "$1"
 	done
-	build::node $1
 }
 
 case $1 in
-	node)
-		build::node $2
-	;;
 	binary)
 	    if [ "$2" = "all" ];then
 			build_items=(chaos grctl node gateway monitor mq worker eventlog api init-probe)
-			for item in ${build_items[@]}
+			for item in "${build_items[@]}"
 			do
 				build::binary $item $1
 			done

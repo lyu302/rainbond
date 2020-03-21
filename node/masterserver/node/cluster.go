@@ -19,30 +19,19 @@
 package node
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
-
-	"github.com/goodrain/rainbond/util/watch"
-
 	"github.com/Sirupsen/logrus"
-	"github.com/pquerna/ffjson/ffjson"
-
-	"github.com/coreos/etcd/mvcc/mvccpb"
-
 	"github.com/goodrain/rainbond/cmd/node/option"
-	"github.com/goodrain/rainbond/node/api/model"
 	"github.com/goodrain/rainbond/node/core/config"
 	"github.com/goodrain/rainbond/node/core/store"
 	"github.com/goodrain/rainbond/node/kubecache"
 	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/util"
+	"github.com/goodrain/rainbond/util/watch"
+	"k8s.io/apimachinery/pkg/api/errors"
 )
 
 //Cluster  node  controller
@@ -77,7 +66,8 @@ func CreateCluster(kubecli kubecache.KubeClient, node *client.HostNode, datacent
 //Start 启动
 func (n *Cluster) Start(errchan chan error) error {
 	go n.loadAndWatchNodes(errchan)
-	go n.worker()
+	go n.installWorker(errchan)
+	go n.loopHandleNodeStatus(errchan)
 	return nil
 }
 
@@ -86,34 +76,13 @@ func (n *Cluster) Stop(i interface{}) {
 	n.cancel()
 }
 
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true
-	}
-	if os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
-func isReady(conditions []client.NodeCondition) bool {
-	for _, c := range conditions {
-		if c.Type == client.NodeReady {
-			return c.Status == client.ConditionTrue
-		}
-	}
-	return false
-}
-
-func (n *Cluster) worker() {
+func (n *Cluster) installWorker(errchan chan error) {
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case newNode := <-n.checkInstall:
-			go n.checkNodeInstall(newNode)
-			//其他异步任务
+		case node := <-n.checkInstall:
+			n.installNode(node)
 		}
 	}
 }
@@ -123,24 +92,10 @@ func (n *Cluster) UpdateNode(node *client.HostNode) {
 	n.nodes[node.ID] = node
 	saveNode := *node
 	saveNode.NodeStatus.KubeNode = nil
-	n.client.Put(option.Config.NodePath+"/"+node.ID, saveNode.String())
-}
-
-func (n *Cluster) getNodeFromKV(kv *mvccpb.KeyValue) *client.HostNode {
-	var node client.HostNode
-	if err := ffjson.Unmarshal(kv.Value, &node); err != nil {
-		logrus.Error("parse node info error:", err.Error())
-		return nil
+	_, err := n.client.Put(option.Config.NodePath+"/"+node.ID, saveNode.String())
+	if err != nil {
+		logrus.Errorf("update node config failure %s", err.Error())
 	}
-	return &node
-}
-func (n *Cluster) getNodeIDFromKey(key string) string {
-	index := strings.LastIndex(key, "/")
-	if index < 0 {
-		return ""
-	}
-	id := key[index+1:]
-	return id
 }
 
 //GetNode get rainbond node info
@@ -148,7 +103,6 @@ func (n *Cluster) GetNode(id string) *client.HostNode {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	if node, ok := n.nodes[id]; ok {
-		n.handleNodeStatus(node)
 		return node
 	}
 	return nil
@@ -156,6 +110,20 @@ func (n *Cluster) GetNode(id string) *client.HostNode {
 func (n *Cluster) getKubeNodeCount() int {
 	kubeNodes, _ := n.kubecli.GetNodes()
 	return len(kubeNodes)
+}
+func (n *Cluster) loopHandleNodeStatus(errchan chan error) {
+	if err := util.Exec(n.ctx, func() error {
+		n.lock.Lock()
+		defer n.lock.Unlock()
+		for key, node := range n.nodes {
+			if time.Since(node.NodeStatus.NodeUpdateTime) > time.Minute*1 {
+				n.handleNodeStatus(n.nodes[key])
+			}
+		}
+		return nil
+	}, time.Second*10); err != nil {
+		errchan <- err
+	}
 }
 
 //handleNodeStatus Master integrates node status and kube node status
@@ -165,60 +133,53 @@ func (n *Cluster) handleNodeStatus(v *client.HostNode) {
 			return
 		}
 	}
-	if time.Now().Sub(v.NodeStatus.NodeUpdateTime) > time.Minute*1 {
+	if time.Since(v.NodeStatus.NodeUpdateTime) > time.Minute*1 {
 		v.Status = client.Unknown
 		v.NodeStatus.Status = client.Unknown
-		r := client.NodeCondition{
-			Type:               client.NodeUp,
-			Status:             client.ConditionFalse,
-			LastHeartbeatTime:  time.Now(),
-			LastTransitionTime: time.Now(),
-			Message:            "Node lost connection, state unknown",
-		}
-		v.UpdataCondition(r)
-		return
-	}
-	r := client.NodeCondition{
-		Type:               client.NodeUp,
-		Status:             client.ConditionTrue,
-		LastHeartbeatTime:  time.Now(),
-		LastTransitionTime: time.Now(),
-		Message:            "Node lost connection, state unknown",
-	}
-	v.UpdataCondition(r)
-	v.NodeStatus.CurrentScheduleStatus = !v.Unschedulable
-	if v.Role.HasRule("compute") {
-		k8sNode, err := n.kubecli.GetNode(v.ID)
-		if err != nil && !errors.IsNotFound(err) {
-			logrus.Errorf("get kube node %s failure %s", v.ID, err.Error())
-		}
-		// Update k8s node status to node status
-		if k8sNode != nil {
-			v.UpdataK8sCondition(k8sNode.Status.Conditions)
-			if v.AvailableCPU == 0 {
-				v.AvailableCPU = k8sNode.Status.Capacity.Cpu().Value()
+		v.GetAndUpdateCondition(client.NodeUp, client.ConditionFalse, "", "Node lost connection, state unknown")
+		//node lost connection, advice offline action
+		v.NodeStatus.AdviceAction = append(v.NodeStatus.AdviceAction, "offline")
+	} else {
+		v.GetAndUpdateCondition(client.NodeUp, client.ConditionTrue, "", "")
+		v.NodeStatus.CurrentScheduleStatus = !v.Unschedulable
+		if v.Role.HasRule("compute") {
+			k8sNode, err := n.kubecli.GetNode(v.ID)
+			if err != nil && !errors.IsNotFound(err) {
+				logrus.Errorf("get kube node %s failure %s", v.ID, err.Error())
 			}
-			if v.AvailableMemory == 0 {
-				v.AvailableMemory = k8sNode.Status.Capacity.Memory().Value()
+			// Update k8s node status to node status
+			if k8sNode != nil {
+				v.UpdataK8sCondition(k8sNode.Status.Conditions)
+				// 添加capacity属性，对应相关属性
+				v.AvailableCPU = k8sNode.Status.Allocatable.Cpu().Value()
+				v.AvailableMemory = k8sNode.Status.Allocatable.Memory().Value()
+				v.NodeStatus.KubeNode = k8sNode
+				v.NodeStatus.KubeUpdateTime = time.Now()
+				v.NodeStatus.CurrentScheduleStatus = !k8sNode.Spec.Unschedulable
+				v.NodeStatus.NodeInfo.ContainerRuntimeVersion = k8sNode.Status.NodeInfo.ContainerRuntimeVersion
 			}
-			v.NodeStatus.KubeNode = k8sNode
-			v.NodeStatus.KubeUpdateTime = time.Now()
-			v.NodeStatus.CurrentScheduleStatus = !k8sNode.Spec.Unschedulable
+		}
+		if (v.Role.HasRule("manage") || v.Role.HasRule("gateway")) && !v.Role.HasRule("compute") { //manage install_success == runnint
+			v.AvailableCPU = v.NodeStatus.NodeInfo.NumCPU
+			v.AvailableMemory = int64(v.NodeStatus.NodeInfo.MemorySize)
+		}
+		//handle status
+		v.Status = v.NodeStatus.Status
+		if v.Role.HasRule("compute") && v.NodeStatus.KubeNode == nil {
+			v.Status = "offline"
 		}
 	}
-	if (v.Role.HasRule("manage") || v.Role.HasRule("gateway")) && !v.Role.HasRule("compute") { //manage install_success == runnint
-		v.AvailableCPU = v.NodeStatus.NodeInfo.NumCPU
-		v.AvailableMemory = int64(v.NodeStatus.NodeInfo.MemorySize)
-	}
-	//handle status
-	v.Status = v.NodeStatus.Status
-	if v.Role.HasRule("compute") && v.NodeStatus.KubeNode == nil {
-		v.Status = "offline"
-	}
-	for _, con := range v.NodeStatus.Conditions {
+	//node ready condition update
+	v.UpdateReadyStatus()
+	for i, con := range v.NodeStatus.Conditions {
 		if con.Type == client.NodeReady {
-			v.NodeStatus.NodeHealth = con.Status == client.ConditionTrue
-			break
+			v.NodeStatus.NodeHealth = v.NodeStatus.Conditions[i].Status == client.ConditionTrue
+		}
+		if time.Since(con.LastHeartbeatTime) > time.Minute*1 {
+			// do not update time
+			v.NodeStatus.Conditions[i].Reason = "Condition not updated in more than 1 minute"
+			v.NodeStatus.Conditions[i].Message = "Condition not updated in more than 1 minute"
+			v.NodeStatus.Conditions[i].Status = client.ConditionUnknown
 		}
 	}
 	if v.NodeStatus.AdviceAction != nil {
@@ -232,7 +193,7 @@ func (n *Cluster) handleNodeStatus(v *client.HostNode) {
 							logrus.Errorf("auto set node is unscheduler failure.")
 						}
 					} else {
-						logrus.Warning("node %s is advice set unscheduler,but only have one node,can not do it", v.ID)
+						logrus.Warningf("node %s is advice set unscheduler,but only have one node,can not do it", v.ID)
 					}
 				}
 			}
@@ -247,10 +208,14 @@ func (n *Cluster) handleNodeStatus(v *client.HostNode) {
 				}
 			}
 			if action == "offline" {
-				//TODO
+				logrus.Warningf("node %s is advice set offline", v.ID)
+				// k8s will offline node itself.
+				// remove the endpoints associated with the node from etcd
+				v.DelEndpoints()
 			}
 		}
 	}
+	//TODO:The latest data is stored back on the etcd, but you should avoid an endless loop
 }
 
 func (n *Cluster) loadAndWatchNodes(errChan chan error) {
@@ -283,130 +248,23 @@ func (n *Cluster) loadAndWatchNodes(errChan chan error) {
 	}
 }
 
-//InstallNode 安装节点
-func (n *Cluster) InstallNode() {
-
+//installNode install node
+//Call the ansible installation script
+func (n *Cluster) installNode(node *client.HostNode) {
+	//TODO:
 }
 
-//CheckNodeInstall 简称节点是否安装 rainbond node
-//如果未安装，尝试安装
-func (n *Cluster) CheckNodeInstall(node *client.HostNode) {
-	n.checkInstall <- node
-}
-func (n *Cluster) checkNodeInstall(node *client.HostNode) {
-	initCondition := client.NodeCondition{
-		Type: client.NodeInit,
-	}
-	defer func() {
-		node.UpdataCondition(initCondition)
-		//n.UpdateNode(node)
-	}()
-	node.Status = "init"
-	node.NodeStatus.Status = "init"
-	errorCondition := func(reason string, err error) {
-		initCondition.Status = client.ConditionFalse
-		initCondition.LastTransitionTime = time.Now()
-		initCondition.LastHeartbeatTime = time.Now()
-		initCondition.Reason = reason
-		if err != nil {
-			initCondition.Message = err.Error()
-		}
-		node.NodeStatus.Conditions = append(node.NodeStatus.Conditions, initCondition)
-		node.Status = "init_failed"
-		node.NodeStatus.Status = "init_failed"
-	}
-	if node.Role == nil {
-		node.Role = []string{"compute"}
-	}
-	role := strings.Join(node.Role, ",")
-	etcdConfig := n.datacenterConfig.GetConfig("ETCD_ADDRS")
-	etcd := n.currentNode.InternalIP
-	if etcdConfig != nil && etcdConfig.Value != nil {
-		logrus.Infof("etcd address is %v when install node", etcdConfig.Value)
-		switch etcdConfig.Value.(type) {
-		case string:
-			if etcdConfig.Value.(string) != "" {
-				etcd = etcdConfig.Value.(string)
-			}
-		case []string:
-			etcd = strings.Join(etcdConfig.Value.([]string), ",")
-		}
-	}
-	initshell := "repo.goodrain.com/release/3.5/gaops/jobs/install/prepare/init.sh"
-	etcd = etcd + ","
-	cmd := fmt.Sprintf("bash -c \"set %s %s %s;$(curl -s %s)\"", node.ID, etcd, role, initshell)
-	logrus.Infof("init endpoint node cmd is %s", cmd)
-
-	//日志输出文件
-	if err := util.CheckAndCreateDir("/var/log/event"); err != nil {
-		logrus.Errorf("check and create dir /var/log/event error,%s", err.Error())
-	}
-	logFile := "/var/log/event/install_node_" + node.ID + ".log"
-	logfile, err := util.OpenOrCreateFile(logFile)
-	if err != nil {
-		logrus.Errorf("check and create install node logfile error,%s", err.Error())
-	}
-	if logfile == nil {
-		logfile = os.Stdout
-	}
-	//结果输出buffer
-	var stderr bytes.Buffer
-	client := util.NewSSHClient(node.InternalIP, "root", node.RootPass, cmd, 22, logfile, &stderr)
-	if err := client.Connection(); err != nil {
-		logrus.Error("init endpoint node error:", err.Error())
-		errorCondition("SSH登陆初始化目标节点失败", err)
-		return
-	}
-	//设置init的结果
-	result := stderr.String()
-	index := strings.Index(result, "{")
-	jsonOutPut := result
-	if index > -1 {
-		jsonOutPut = result[index:]
-	}
-	output, err := model.ParseTaskOutPut(jsonOutPut)
-	if err != nil {
-		errorCondition("节点初始化输出数据错误", err)
-		logrus.Errorf("get init current node result error:%s", err.Error())
-	}
-	node.Status = "init_success"
-	node.NodeStatus.Status = "init_success"
-	if output.Global != nil {
-		for k, v := range output.Global {
-			if strings.Index(v, ",") > -1 {
-				values := strings.Split(v, ",")
-				util.Deweight(&values)
-				n.datacenterConfig.PutConfig(&model.ConfigUnit{
-					Name:           strings.ToUpper(k),
-					Value:          values,
-					ValueType:      "array",
-					IsConfigurable: false,
-				})
-			} else {
-				n.datacenterConfig.PutConfig(&model.ConfigUnit{
-					Name:           strings.ToUpper(k),
-					Value:          v,
-					ValueType:      "string",
-					IsConfigurable: false,
-				})
-			}
-		}
-	}
-	node.Update()
-}
-
-//GetAllNode 获取全部节点
+//GetAllNode get all node info from local cache
 func (n *Cluster) GetAllNode() (nodes []*client.HostNode) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	for _, v := range n.nodes {
-		n.handleNodeStatus(v)
 		nodes = append(nodes, v)
 	}
 	return
 }
 
-//CacheNode 添加节点到缓存
+//CacheNode add node to local cache
 func (n *Cluster) CacheNode(node *client.HostNode) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
@@ -414,7 +272,7 @@ func (n *Cluster) CacheNode(node *client.HostNode) {
 	n.nodes[node.ID] = node
 }
 
-//RemoveNode 从缓存移除节点
+//RemoveNode remove node from local cache
 func (n *Cluster) RemoveNode(nodeID string) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
@@ -423,20 +281,21 @@ func (n *Cluster) RemoveNode(nodeID string) {
 	}
 }
 
-//GetLabelsNode 返回匹配labels的节点ID
+//GetLabelsNode return node ids that matching labels
 func (n *Cluster) GetLabelsNode(labels map[string]string) []string {
 	var nodes []string
 	for _, node := range n.nodes {
-		if checkLables(node, labels) {
+		if checkLabels(node, labels) {
 			nodes = append(nodes, node.ID)
 		}
 	}
 	return nodes
 }
 
-func checkLables(node *client.HostNode, labels map[string]string) bool {
+func checkLabels(node *client.HostNode, labels map[string]string) bool {
+	existLabels := node.MergeLabels()
 	for k, v := range labels {
-		if nodev := node.Labels[k]; nodev != v {
+		if nodev := existLabels[k]; nodev != v {
 			return false
 		}
 	}

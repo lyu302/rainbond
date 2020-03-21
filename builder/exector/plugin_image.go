@@ -23,17 +23,14 @@ import (
 	"strings"
 
 	"github.com/goodrain/rainbond/builder"
+	"github.com/goodrain/rainbond/builder/model"
 	"github.com/goodrain/rainbond/builder/sources"
-
 	"github.com/goodrain/rainbond/db"
 	"github.com/goodrain/rainbond/event"
-
+	"github.com/goodrain/rainbond/mq/api/grpc/pb"
 	"github.com/pquerna/ffjson/ffjson"
 
-	"github.com/goodrain/rainbond/builder/model"
-
 	"github.com/Sirupsen/logrus"
-	"github.com/goodrain/rainbond/mq/api/grpc/pb"
 )
 
 func (e *exectorManager) pluginImageBuild(task *pb.TaskMessage) {
@@ -66,12 +63,11 @@ func (e *exectorManager) pluginImageBuild(task *pb.TaskMessage) {
 	if err := db.GetManager().TenantPluginBuildVersionDao().UpdateModel(version); err != nil {
 		logrus.Errorf("update version error, %v", err)
 	}
-	ErrorNum++
+	MetricErrorTaskNum++
 	logger.Info("镜像构建插件任务执行失败", map[string]string{"step": "callback", "status": "failure"})
 }
 
 func (e *exectorManager) run(t *model.BuildPluginTaskBody, logger event.Logger) error {
-
 	if _, err := sources.ImagePull(e.DockerClient, t.ImageURL, t.ImageInfo.HubUser, t.ImageInfo.HubPassword, logger, 10); err != nil {
 		logrus.Errorf("pull image %v error, %v", t.ImageURL, err)
 		logger.Error("拉取镜像失败", map[string]string{"step": "builder-exector", "status": "failure"})

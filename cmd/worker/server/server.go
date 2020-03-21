@@ -29,15 +29,17 @@ import (
 	"github.com/goodrain/rainbond/db"
 	"github.com/goodrain/rainbond/db/config"
 	"github.com/goodrain/rainbond/event"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
+	k8sutil "github.com/goodrain/rainbond/util/k8s"
 	"github.com/goodrain/rainbond/worker/appm"
 	"github.com/goodrain/rainbond/worker/appm/controller"
 	"github.com/goodrain/rainbond/worker/appm/store"
 	"github.com/goodrain/rainbond/worker/discover"
+	"github.com/goodrain/rainbond/worker/gc"
 	"github.com/goodrain/rainbond/worker/master"
 	"github.com/goodrain/rainbond/worker/monitor"
 	"github.com/goodrain/rainbond/worker/server"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 //Run start run
@@ -54,31 +56,35 @@ func Run(s *option.Worker) error {
 		return err
 	}
 	defer db.CloseManager()
-
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: s.Config.EtcdEndPoints,
+		CaFile:    s.Config.EtcdCaFile,
+		CertFile:  s.Config.EtcdCertFile,
+		KeyFile:   s.Config.EtcdKeyFile,
+	}
 	if err := event.NewManager(event.EventConfig{
 		EventLogServers: s.Config.EventLogServers,
-		DiscoverAddress: s.Config.EtcdEndPoints,
+		DiscoverArgs:    etcdClientArgs,
 	}); err != nil {
 		return err
 	}
 	defer event.CloseManager()
 
 	//step 2 : create kube client and etcd client
-	c, err := clientcmd.BuildConfigFromFlags("", s.Config.KubeConfig)
+	restConfig, err := k8sutil.NewRestConfig(s.Config.KubeConfig)
 	if err != nil {
-		logrus.Error("read kube config file error.", err)
+		logrus.Errorf("create kube rest config error: %s", err.Error())
 		return err
 	}
-	clientset, err := kubernetes.NewForConfig(c)
+	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		logrus.Error("create kube api client error", err)
+		logrus.Errorf("create kube client error: %s", err.Error())
 		return err
 	}
 	s.Config.KubeClient = clientset
-	//etcdCli, err := client.New(client.Config{})
 
 	//step 3: create resource store
-	startCh := channels.NewRingChannel(1024) // TODO: why 1024?
+	startCh := channels.NewRingChannel(1024)
 	updateCh := channels.NewRingChannel(1024)
 	probeCh := channels.NewRingChannel(1024)
 	cachestore := store.NewStore(clientset, db.GetManager(), s.Config, startCh, probeCh)
@@ -93,7 +99,7 @@ func Run(s *option.Worker) error {
 	}
 
 	//step 4: create controller manager
-	controllerManager := controller.NewManager(cachestore, clientset)
+	controllerManager := controller.NewManager(cachestore, clientset, s.Config.RBDNamespace, s.Config.RBDDNSName)
 	defer controllerManager.Stop()
 
 	//step 5 : start runtime master
@@ -105,17 +111,20 @@ func Run(s *option.Worker) error {
 		return err
 	}
 	defer masterCon.Stop()
+
 	//step 6 : create discover module
-	taskManager := discover.NewTaskManager(s.Config, cachestore, controllerManager, startCh)
+	garbageCollector := gc.NewGarbageCollector(clientset)
+	taskManager := discover.NewTaskManager(s.Config, cachestore, controllerManager, garbageCollector, startCh)
 	if err := taskManager.Start(); err != nil {
 		return err
 	}
 	defer taskManager.Stop()
 	//step 7: start app runtimer server
-	runtimeServer := server.CreaterRuntimeServer(s.Config, cachestore, updateCh)
+	runtimeServer := server.CreaterRuntimeServer(s.Config, cachestore, clientset, updateCh)
 	runtimeServer.Start(errChan)
+
 	//step 8: create application use resource exporter.
-	exporterManager := monitor.NewManager(s.Config, masterCon)
+	exporterManager := monitor.NewManager(s.Config, masterCon, controllerManager)
 	if err := exporterManager.Start(); err != nil {
 		return err
 	}

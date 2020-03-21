@@ -23,10 +23,11 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
-
 	"github.com/Sirupsen/logrus"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/util"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -44,16 +45,16 @@ func (s *stopController) Begin() {
 		go func(service v1.AppService) {
 			wait.Add(1)
 			defer wait.Done()
-			service.Logger.Info("App runtime begin stop app service "+service.ServiceAlias, getLoggerOption("starting"))
+			service.Logger.Info("App runtime begin stop app service "+service.ServiceAlias, event.GetLoggerOption("starting"))
 			if err := s.stopOne(service); err != nil {
 				if err != ErrWaitTimeOut {
-					service.Logger.Error(fmt.Sprintf("stop service %s failure %s", service.ServiceAlias, err.Error()), GetCallbackLoggerOption())
+					service.Logger.Error(util.Translation("stop service error"), event.GetCallbackLoggerOption())
 					logrus.Errorf("stop service %s failure %s", service.ServiceAlias, err.Error())
 				} else {
-					service.Logger.Error(fmt.Sprintf("stop service timeout,please waiting it closed"), GetTimeoutLoggerOption())
+					service.Logger.Error(util.Translation("stop service timeout"), event.GetTimeoutLoggerOption())
 				}
 			} else {
-				service.Logger.Info(fmt.Sprintf("stop service %s success", service.ServiceAlias), GetLastLoggerOption())
+				service.Logger.Info(fmt.Sprintf("stop service %s success", service.ServiceAlias), event.GetLastLoggerOption())
 			}
 		}(service)
 	}
@@ -61,11 +62,14 @@ func (s *stopController) Begin() {
 	s.manager.callback(s.controllerID, nil)
 }
 func (s *stopController) stopOne(app v1.AppService) error {
+	var zero int64
 	//step 1: delete services
-	if services := app.GetServices(); services != nil {
+	if services := app.GetServices(true); services != nil {
 		for _, service := range services {
 			if service != nil && service.Name != "" {
-				err := s.manager.client.CoreV1().Services(app.TenantID).Delete(service.Name, &metav1.DeleteOptions{})
+				err := s.manager.client.CoreV1().Services(app.TenantID).Delete(service.Name, &metav1.DeleteOptions{
+					GracePeriodSeconds: &zero,
+				})
 				if err != nil && !errors.IsNotFound(err) {
 					return fmt.Errorf("delete service failure:%s", err.Error())
 				}
@@ -73,26 +77,28 @@ func (s *stopController) stopOne(app v1.AppService) error {
 		}
 	}
 	//step 2: delete secrets
-	if secrets := app.GetSecrets(); secrets != nil {
+	if secrets := app.GetSecrets(true); secrets != nil {
 		for _, secret := range secrets {
 			if secret != nil && secret.Name != "" {
-				err := s.manager.client.CoreV1().Secrets(app.TenantID).Delete(secret.Name, &metav1.DeleteOptions{})
+				err := s.manager.client.CoreV1().Secrets(app.TenantID).Delete(secret.Name, &metav1.DeleteOptions{
+					GracePeriodSeconds: &zero,
+				})
 				if err != nil && !errors.IsNotFound(err) {
 					return fmt.Errorf("delete secret failure:%s", err.Error())
 				}
-				s.manager.store.OnDelete(secret)
 			}
 		}
 	}
 	//step 3: delete ingress
-	if ingresses := app.GetIngress(); ingresses != nil {
+	if ingresses := app.GetIngress(true); ingresses != nil {
 		for _, ingress := range ingresses {
 			if ingress != nil && ingress.Name != "" {
-				err := s.manager.client.ExtensionsV1beta1().Ingresses(app.TenantID).Delete(ingress.Name, &metav1.DeleteOptions{})
+				err := s.manager.client.ExtensionsV1beta1().Ingresses(app.TenantID).Delete(ingress.Name, &metav1.DeleteOptions{
+					GracePeriodSeconds: &zero,
+				})
 				if err != nil && !errors.IsNotFound(err) {
 					return fmt.Errorf("delete ingress failure:%s", err.Error())
 				}
-				s.manager.store.OnDelete(ingress)
 			}
 		}
 	}
@@ -100,11 +106,12 @@ func (s *stopController) stopOne(app v1.AppService) error {
 	if configs := app.GetConfigMaps(); configs != nil {
 		for _, config := range configs {
 			if config != nil && config.Name != "" {
-				err := s.manager.client.CoreV1().ConfigMaps(app.TenantID).Delete(config.Name, &metav1.DeleteOptions{})
+				err := s.manager.client.CoreV1().ConfigMaps(app.TenantID).Delete(config.Name, &metav1.DeleteOptions{
+					GracePeriodSeconds: &zero,
+				})
 				if err != nil && !errors.IsNotFound(err) {
 					return fmt.Errorf("delete config map failure:%s", err.Error())
 				}
-				s.manager.store.OnDelete(config)
 			}
 		}
 	}
@@ -114,18 +121,18 @@ func (s *stopController) stopOne(app v1.AppService) error {
 		if err != nil && !errors.IsNotFound(err) {
 			return fmt.Errorf("delete statefulset failure:%s", err.Error())
 		}
-		s.manager.store.OnDelete(statefulset)
+		s.manager.store.OnDeletes(statefulset)
 	}
 	if deployment := app.GetDeployment(); deployment != nil && deployment.Name != "" {
 		err := s.manager.client.AppsV1().Deployments(app.TenantID).Delete(deployment.Name, &metav1.DeleteOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return fmt.Errorf("delete deployment failure:%s", err.Error())
 		}
-		s.manager.store.OnDelete(deployment)
+		s.manager.store.OnDeletes(deployment)
 	}
 	//step 6: delete all pod
 	var gracePeriodSeconds int64
-	if pods := app.GetPods(); pods != nil {
+	if pods := app.GetPods(true); pods != nil {
 		for _, pod := range pods {
 			if pod != nil && pod.Name != "" {
 				err := s.manager.client.CoreV1().Pods(app.TenantID).Delete(pod.Name, &metav1.DeleteOptions{
@@ -134,12 +141,21 @@ func (s *stopController) stopOne(app v1.AppService) error {
 				if err != nil && !errors.IsNotFound(err) {
 					return fmt.Errorf("delete pod failure:%s", err.Error())
 				}
-				s.manager.store.OnDelete(pod)
 			}
 		}
 	}
+
+	if hpas := app.GetHPAs(); len(hpas) != 0 {
+		for _, hpa := range hpas {
+			err := s.manager.client.AutoscalingV2beta1().HorizontalPodAutoscalers(hpa.GetNamespace()).Delete(hpa.GetName(), &metav1.DeleteOptions{})
+			if err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("delete hpa: %v", err)
+			}
+		}
+	}
+
 	//step 7: waiting endpoint ready
-	app.Logger.Info("Delete all app model success, will waiting app closed", getLoggerOption("running"))
+	app.Logger.Info("Delete all app model success, will waiting app closed", event.GetLoggerOption("running"))
 	return s.WaitingReady(app)
 }
 func (s *stopController) Stop() error {

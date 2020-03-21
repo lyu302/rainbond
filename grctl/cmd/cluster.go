@@ -21,14 +21,17 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/apcera/termtables"
+	"github.com/ghodss/yaml"
 	"github.com/goodrain/rainbond/grctl/clients"
 	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/gosuri/uitable"
 	"github.com/urfave/cli"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 //NewCmdCluster cmd for cluster
@@ -36,6 +39,16 @@ func NewCmdCluster() cli.Command {
 	c := cli.Command{
 		Name:  "cluster",
 		Usage: "show curren cluster datacenter info",
+		Subcommands: []cli.Command{
+			cli.Command{
+				Name:  "config",
+				Usage: "prints the current cluster configuration",
+				Action: func(c *cli.Context) error {
+					Common(c)
+					return printConfig(c)
+				},
+			},
+		},
 		Action: func(c *cli.Context) error {
 			Common(c)
 			return getClusterInfo(c)
@@ -51,31 +64,33 @@ func getClusterInfo(c *cli.Context) error {
 		if err.Code == 502 {
 			fmt.Println("The current cluster node manager is not working properly.")
 			fmt.Println("You can query the service log for troubleshooting.")
-			fmt.Println("Exec Command: journalctl -fu node")
 			os.Exit(1)
 		}
 		fmt.Println("The current cluster api server is not working properly.")
 		fmt.Println("You can query the service log for troubleshooting.")
-		fmt.Println("Exec Command: journalctl -fu rbd-api")
 		os.Exit(1)
 	}
+	healthCPUFree := fmt.Sprintf("%.2f", float32(clusterInfo.HealthCapCPU)-clusterInfo.HealthReqCPU)
+	unhealthCPUFree := fmt.Sprintf("%.2f", float32(clusterInfo.UnhealthCapCPU)-clusterInfo.UnhealthReqCPU)
+	healthMemFree := fmt.Sprintf("%d", clusterInfo.HealthCapMem-clusterInfo.HealthReqMem)
+	unhealthMemFree := fmt.Sprintf("%d", clusterInfo.UnhealthCapMem-clusterInfo.UnhealthReqMem)
 	table := uitable.New()
-	table.AddRow("", "Used/Total", "Use of")
-	table.AddRow("CPU", fmt.Sprintf("%2.f/%d", clusterInfo.ReqCPU, clusterInfo.CapCPU),
+	table.AddRow("", "Used/Total", "Use of", "Health free", "Unhealth free")
+	table.AddRow("CPU(Core)", fmt.Sprintf("%.2f/%d", clusterInfo.ReqCPU, clusterInfo.CapCPU),
 		fmt.Sprintf("%d", func() int {
 			if clusterInfo.CapCPU == 0 {
 				return 0
 			}
 			return int(clusterInfo.ReqCPU * 100 / float32(clusterInfo.CapCPU))
-		}())+"%")
-	table.AddRow("Memory", fmt.Sprintf("%d/%d", clusterInfo.ReqMem, clusterInfo.CapMem),
+		}())+"%", "\033[0;32;32m"+healthCPUFree+"\033[0m \t\t", unhealthCPUFree)
+	table.AddRow("Memory(Mb)", fmt.Sprintf("%d/%d", clusterInfo.ReqMem, clusterInfo.CapMem),
 		fmt.Sprintf("%d", func() int {
 			if clusterInfo.CapMem == 0 {
 				return 0
 			}
 			return int(float32(clusterInfo.ReqMem*100) / float32(clusterInfo.CapMem))
-		}())+"%")
-	table.AddRow("DistributedDisk", fmt.Sprintf("%dGb/%dGb", clusterInfo.ReqDisk/1024/1024/1024, clusterInfo.CapDisk/1024/1024/1024),
+		}())+"%", "\033[0;32;32m"+healthMemFree+" \033[0m \t\t", unhealthMemFree)
+	table.AddRow("DistributedDisk(Gb)", fmt.Sprintf("%d/%d", clusterInfo.ReqDisk/1024/1024/1024, clusterInfo.CapDisk/1024/1024/1024),
 		fmt.Sprintf("%.2f", func() float32 {
 			if clusterInfo.CapDisk == 0 {
 				return 0
@@ -84,22 +99,8 @@ func getClusterInfo(c *cli.Context) error {
 		}())+"%")
 	fmt.Println(table)
 
-	//show services health status
-	allNodeHealth, err := clients.RegionClient.Nodes().GetAllNodeHealth()
-	handleErr(err)
-	serviceTable2 := termtables.CreateTable()
-	serviceTable2.AddHeaders("Service", "HealthyQuantity/Total", "Message")
-	serviceStatusInfo := allNodeHealth
-	status, message := clusterStatus(serviceStatusInfo["Role"], serviceStatusInfo["Ready"])
-	serviceTable2.AddRow("\033[0;33;33mClusterStatus\033[0m", status, message)
-	for name, v := range serviceStatusInfo {
-		if name == "Role" {
-			continue
-		}
-		status, message := summaryResult(v)
-		serviceTable2.AddRow(name, status, message)
-	}
-	fmt.Println(serviceTable2.Render())
+	//show component health status
+	printComponentStatus()
 	//show node detail
 	serviceTable := termtables.CreateTable()
 	serviceTable.AddHeaders("Uid", "IP", "HostName", "NodeRole", "Status")
@@ -211,7 +212,7 @@ func clusterStatus(roleList []map[string]string, ReadyList []map[string]string) 
 			manageFlag = true
 		}
 		if strings.Contains(v["role"], "gateway") && v["status"] == "running" {
-			manageFlag = true
+			gatewayFlag = true
 		}
 	}
 	if !manageFlag {
@@ -227,4 +228,24 @@ func clusterStatus(roleList []map[string]string, ReadyList []map[string]string) 
 		errMessage = "No gateway nodes are available in the cluster"
 	}
 	return clusterStatus, errMessage
+}
+
+func printComponentStatus() {
+	fmt.Println("----------------------------------------------------------------------------------")
+	fmt.Println()
+	cmd := exec.Command("kubectl", "get", "pod", "-n", "rbd-system", "-o", "wide")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+	fmt.Println()
+}
+
+func printConfig(c *cli.Context) error {
+	config, err := clients.RainbondKubeClient.RainbondV1alpha1().RainbondClusters("rbd-system").Get("rainbondcluster", metav1.GetOptions{})
+	if err != nil {
+		showError(err.Error())
+	}
+	out, _ := yaml.Marshal(config)
+	fmt.Println(string(out))
+	return nil
 }

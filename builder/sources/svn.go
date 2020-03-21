@@ -133,6 +133,7 @@ func getBranchPath(branch, url string) string {
 
 // Checkout
 func (c *svnclient) Checkout() (*Info, error) {
+	tempURL := c.svnURL
 	//handle branch or tags
 	if c.csi.Branch != "" {
 		c.svnURL = getBranchPath(c.csi.Branch, c.svnURL)
@@ -152,6 +153,16 @@ func (c *svnclient) Checkout() (*Info, error) {
 		//if trunk will change url retry
 		if strings.Contains(err.Error(), "svn:E170000") && c.csi.Branch == "trunk" {
 			c.svnURL = c.svnURL[:len(c.svnURL)-6]
+			cmd := []string{"checkout", c.svnURL}
+			if c.svnDir != "" {
+				cmd = append(cmd, c.svnDir)
+			}
+			_, err = c.runWithLogger(cmd...)
+			if err != nil {
+				return nil, err
+			}
+		} else if strings.Contains(err.Error(), "svn:E170000") && (c.csi.Branch != "trunk" && !strings.HasPrefix(c.csi.Branch, "tag:")) {
+			c.svnURL = tempURL + "/" + c.csi.Branch
 			cmd := []string{"checkout", c.svnURL}
 			if c.svnDir != "" {
 				cmd = append(cmd, c.svnDir)
@@ -299,7 +310,7 @@ func (c *svnclient) runWithLogger(args ...string) ([]byte, error) {
 	}
 	cmd.Dir = c.svnDir
 	writer := c.logger.GetWriter("progress", "debug")
-	writer.SetFormat(`{"progress":"%s","id":"SVN:"}`)
+	writer.SetFormat(map[string]interface{}{"progress": "%s", "id": "SVN:"})
 	cmd.Stdout = writer
 	errorWriter := bytes.NewBuffer(nil)
 	cmd.Stderr = errorWriter

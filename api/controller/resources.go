@@ -21,7 +21,6 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/goodrain/rainbond/db/errors"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -35,25 +34,28 @@ import (
 	"github.com/goodrain/rainbond/api/middleware"
 	api_model "github.com/goodrain/rainbond/api/model"
 	"github.com/goodrain/rainbond/cmd"
+	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/db/errors"
 	dbmodel "github.com/goodrain/rainbond/db/model"
 	mqclient "github.com/goodrain/rainbond/mq/client"
+	validation "github.com/goodrain/rainbond/util/endpoint"
 	httputil "github.com/goodrain/rainbond/util/http"
 	"github.com/goodrain/rainbond/worker/client"
 	"github.com/jinzhu/gorm"
 	"github.com/renstorm/fuzzysearch/fuzzy"
-	"github.com/thedevsaddam/govalidator"
+	validator "github.com/thedevsaddam/govalidator"
 )
 
 //V2Routes v2Routes
 type V2Routes struct {
 	TenantStruct
-	AcpNodeStruct
 	EventLogStruct
 	AppStruct
 	GatewayStruct
 	ThirdPartyServiceController
 	LabelController
 	AppRestoreController
+	PodController
 }
 
 //Show test
@@ -109,7 +111,7 @@ type TenantStruct struct {
 
 //AllTenantResources GetResources
 func (t *TenantStruct) AllTenantResources(w http.ResponseWriter, r *http.Request) {
-	tenants, err := handler.GetTenantManager().GetTenants()
+	tenants, err := handler.GetTenantManager().GetTenants("")
 	if err != nil {
 		msg := httputil.ResponseBody{
 			Msg: fmt.Sprintf("get tenant error, %v", err),
@@ -379,8 +381,20 @@ func (t *TenantStruct) SumTenants(w http.ResponseWriter, r *http.Request) {
 	httputil.ReturnSuccess(r, w, rc)
 }
 
-//Tenant Tenant
+//Tenant one tenant controller
 func (t *TenantStruct) Tenant(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		t.GetTenant(w, r)
+	case "DELETE":
+		t.DeleteTenant(w, r)
+	case "PUT":
+		t.UpdateTenant(w, r)
+	}
+}
+
+//Tenants Tenant
+func (t *TenantStruct) Tenants(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
 		t.AddTenant(w, r)
@@ -438,6 +452,7 @@ func (t *TenantStruct) AddTenant(w http.ResponseWriter, r *http.Request) {
 			dbts.UUID = ts.Body.TenantID
 			id = ts.Body.TenantID
 		}
+		dbts.LimitMemory = ts.Body.LimitMemory
 		if err := handler.GetServiceManager().CreateTenant(&dbts); err != nil {
 			if strings.HasSuffix(err.Error(), "is exist") {
 				httputil.ReturnError(r, w, 400, err.Error())
@@ -499,33 +514,78 @@ func (t *TenantStruct) GetTenants(w http.ResponseWriter, r *http.Request) {
 	//       "$ref": "#/responses/commandResponse"
 	//     description: 统一返回格式
 	value := r.FormValue("eid")
-	id := len(value)
-	if id == 0 {
-		tenants, err := handler.GetTenantManager().GetTenants()
+	page, _ := strconv.Atoi(r.FormValue("page"))
+	if page == 0 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(r.FormValue("pageSize"))
+	if pageSize == 0 {
+		pageSize = 10
+	}
+	queryName := r.FormValue("query")
+	var tenants []*dbmodel.Tenants
+	var err error
+	if len(value) == 0 {
+		tenants, err = handler.GetTenantManager().GetTenants(queryName)
 		if err != nil {
 			httputil.ReturnError(r, w, 500, "get tenant error")
 			return
 		}
-		httputil.ReturnSuccess(r, w, tenants)
-		return
+	} else {
+		tenants, err = handler.GetTenantManager().GetTenantsByEid(value, queryName)
+		if err != nil {
+			httputil.ReturnError(r, w, 500, "get tenant error")
+			return
+		}
 	}
-
-	tenants, err := handler.GetTenantManager().GetTenantsByEid(value)
-	if err != nil {
-		httputil.ReturnError(r, w, 500, "get tenant error")
-		return
-	}
-	httputil.ReturnSuccess(r, w, tenants)
+	list := handler.GetTenantManager().BindTenantsResource(tenants)
+	re := list.Paging(page, pageSize)
+	httputil.ReturnSuccess(r, w, re)
 }
 
 //DeleteTenant DeleteTenant
 func (t *TenantStruct) DeleteTenant(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("delete tenant"))
+	tenantID := r.Context().Value(middleware.ContextKey("tenant_id")).(string)
+
+	if err := handler.GetTenantManager().DeleteTenant(tenantID); err != nil {
+		if err == handler.ErrTenantStillHasServices || err == handler.ErrTenantStillHasPlugins {
+			httputil.ReturnError(r, w, 400, err.Error())
+			return
+		}
+		if err == gorm.ErrRecordNotFound {
+			httputil.ReturnError(r, w, 404, err.Error())
+			return
+		}
+
+		httputil.ReturnError(r, w, 500, fmt.Sprintf("delete tenant: %v", err))
+		return
+	}
+
+	httputil.ReturnSuccess(r, w, nil)
 }
 
 //UpdateTenant UpdateTenant
+//support update tenant limit memory
 func (t *TenantStruct) UpdateTenant(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("update tenant"))
+	var ts api_model.UpdateTenantStruct
+	ok := httputil.ValidatorRequestStructAndErrorResponse(r, w, &ts.Body, nil)
+	if !ok {
+		return
+	}
+	tenant := r.Context().Value(middleware.ContextKey("tenant")).(*dbmodel.Tenants)
+	tenant.LimitMemory = ts.Body.LimitMemory
+	if err := handler.GetTenantManager().UpdateTenant(tenant); err != nil {
+		httputil.ReturnError(r, w, 500, "update tenant error")
+		return
+	}
+	httputil.ReturnSuccess(r, w, tenant)
+}
+
+//GetTenant get one tenant
+func (t *TenantStruct) GetTenant(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(middleware.ContextKey("tenant")).(*dbmodel.Tenants)
+	list := handler.GetTenantManager().BindTenantsResource([]*dbmodel.Tenants{tenant})
+	httputil.ReturnSuccess(r, w, list[0])
 }
 
 //ServicesCount Get all apps and status
@@ -587,6 +647,9 @@ func (t *TenantStruct) CreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// clean etcd data(source check)
+	handler.GetEtcdHandler().CleanServiceCheckData(ss.EtcdKey)
+
 	values := url.Values{}
 	if ss.Endpoints != nil && strings.TrimSpace(ss.Endpoints.Static) != "" {
 		if strings.Contains(ss.Endpoints.Static, "127.0.0.1") {
@@ -601,9 +664,13 @@ func (t *TenantStruct) CreateService(w http.ResponseWriter, r *http.Request) {
 	tenantID := r.Context().Value(middleware.ContextKey("tenant_id")).(string)
 	ss.TenantID = tenantID
 	if err := handler.GetServiceManager().ServiceCreate(&ss); err != nil {
+		if strings.Contains(err.Error(), "is exist in tenant") {
+			httputil.ReturnError(r, w, 400, fmt.Sprintf("create service error, %v", err))
+		}
 		httputil.ReturnError(r, w, 500, fmt.Sprintf("create service error, %v", err))
 		return
 	}
+
 	httputil.ReturnSuccess(r, w, nil)
 }
 
@@ -629,7 +696,6 @@ func (t *TenantStruct) UpdateService(w http.ResponseWriter, r *http.Request) {
 	//     schema:
 	//       "$ref": "#/responses/commandResponse"
 	//     description: 统一返回格式
-
 	logrus.Debugf("trans update service service")
 	//目前提供三个元素的修改
 	rules := validator.MapData{
@@ -637,6 +703,7 @@ func (t *TenantStruct) UpdateService(w http.ResponseWriter, r *http.Request) {
 		"image_name":       []string{},
 		"container_memory": []string{},
 		"service_name":     []string{},
+		"extend_method":    []string{},
 	}
 	data, ok := httputil.ValidatorRequestMapAndErrorResponse(r, w, rules, nil)
 	if !ok {
@@ -760,13 +827,8 @@ func (t *TenantStruct) StatusServiceList(w http.ResponseWriter, r *http.Request)
 	//logrus.Info(services.Body.ServiceIDs)
 	serviceList := services.Body.ServiceIDs
 	tenantID := r.Context().Value(middleware.ContextKey("tenant_id")).(string)
-	statusList := handler.GetServiceManager().GetServicesStatus(tenantID, serviceList)
-	var info = make([]map[string]string, 0)
-	if statusList != nil {
-		for k, v := range statusList {
-			info = append(info, map[string]string{"service_id": k, "status": v, "status_cn": TransStatus(v)})
-		}
-	}
+	info := handler.GetServiceManager().GetServicesStatus(tenantID, serviceList)
+
 	httputil.ReturnSuccess(r, w, info)
 }
 
@@ -912,8 +974,15 @@ func (t *TenantStruct) GetSingleServiceInfo(w http.ResponseWriter, r *http.Reque
 //     description: 统一返回格式
 func (t *TenantStruct) DeleteSingleServiceInfo(w http.ResponseWriter, r *http.Request) {
 	serviceID := r.Context().Value(middleware.ContextKey("service_id")).(string)
-	if err := handler.GetServiceManager().TransServieToDelete(serviceID); err != nil {
-		if err == fmt.Errorf("unclosed") {
+	tenantID := r.Context().Value(middleware.ContextKey("tenant_id")).(string)
+	var req api_model.EtcdCleanReq
+	if httputil.ValidatorRequestStructAndErrorResponse(r, w, &req, nil) {
+		logrus.Debugf("delete service etcd keys : %+v", req.Keys)
+		handler.GetEtcdHandler().CleanAllServiceData(req.Keys)
+	}
+
+	if err := handler.GetServiceManager().TransServieToDelete(tenantID, serviceID); err != nil {
+		if err == handler.ErrServiceNotClosed {
 			httputil.ReturnError(r, w, 400, fmt.Sprintf("Service must be closed"))
 			return
 		}
@@ -1380,6 +1449,23 @@ func (t *TenantStruct) PortOuterController(w http.ResponseWriter, r *http.Reques
 	}
 
 	serviceID := r.Context().Value(middleware.ContextKey("service_id")).(string)
+	service := r.Context().Value(middleware.ContextKey("service")).(*dbmodel.TenantServices)
+	if dbmodel.ServiceKind(service.Kind) == dbmodel.ServiceKindThirdParty {
+		endpoints, err := db.GetManager().EndpointsDao().List(serviceID)
+		if err != nil {
+			logrus.Errorf("find endpoints by sid[%s], error: %s", serviceID, err.Error())
+			httputil.ReturnError(r, w, 500, "fund endpoints failure")
+			return
+		}
+		for _, ep := range endpoints {
+			address := validation.SplitEndpointAddress(ep.IP)
+			if validation.IsDomainNotIP(address) {
+				httputil.ReturnError(r, w, 400, "do not allow operate outer port for thirdpart domain endpoints")
+				return
+			}
+		}
+	}
+
 	tenantName := r.Context().Value(middleware.ContextKey("tenant_name")).(string)
 	portStr := chi.URLParam(r, "port")
 	containerPort, err := strconv.Atoi(portStr)
@@ -1486,29 +1572,6 @@ func (t *TenantStruct) PortInnerController(w http.ResponseWriter, r *http.Reques
 	httputil.ReturnSuccess(r, w, nil)
 }
 
-//ChangeLBPort change lb mapping port
-//only support change to existing port in this tenants
-func (t *TenantStruct) ChangeLBPort(w http.ResponseWriter, r *http.Request) {
-	serviceID := r.Context().Value(middleware.ContextKey("service_id")).(string)
-	tenantID := r.Context().Value(middleware.ContextKey("tenant_id")).(string)
-	portStr := chi.URLParam(r, "port")
-	containerPort, err := strconv.Atoi(portStr)
-	if err != nil {
-		httputil.ReturnError(r, w, 400, "port must be a number")
-		return
-	}
-	var data api_model.ServiceLBPortChange
-	if !httputil.ValidatorRequestStructAndErrorResponse(r, w, &(data.Body), nil) {
-		return
-	}
-	mapport, errc := handler.GetServiceManager().ChangeLBPort(tenantID, serviceID, containerPort, data.Body.ChangePort)
-	if errc != nil {
-		errc.Handle(r, w)
-		return
-	}
-	httputil.ReturnSuccess(r, w, mapport)
-}
-
 //Pods pods
 // swagger:operation GET  /v2/tenants/{tenant_name}/services/{service_alias}/pods v2 getPodsInfo
 //
@@ -1535,7 +1598,7 @@ func (t *TenantStruct) Pods(w http.ResponseWriter, r *http.Request) {
 	pods, err := handler.GetServiceManager().GetPods(serviceID)
 	if err != nil {
 		if err.Error() == gorm.ErrRecordNotFound.Error() {
-			logrus.Error("record notfound:", err)
+			logrus.Error("record not found:", err)
 			httputil.ReturnError(r, w, 404, fmt.Sprintf("get pods error, %v", err))
 			return
 		}
@@ -1606,6 +1669,7 @@ func (t *TenantStruct) AddProbe(w http.ResponseWriter, r *http.Request) {
 		httputil.ReturnError(r, w, 500, fmt.Sprintf("add service probe error, %v", err))
 		return
 	}
+	httputil.ReturnSuccess(r, w, nil)
 }
 
 //UpdateProbe update probe
@@ -1659,6 +1723,7 @@ func (t *TenantStruct) UpdateProbe(w http.ResponseWriter, r *http.Request) {
 		httputil.ReturnError(r, w, 500, fmt.Sprintf("update service probe error, %v", err))
 		return
 	}
+	httputil.ReturnSuccess(r, w, nil)
 }
 
 //DeleteProbe delete probe
@@ -1700,6 +1765,7 @@ func (t *TenantStruct) DeleteProbe(w http.ResponseWriter, r *http.Request) {
 		httputil.ReturnError(r, w, 500, fmt.Sprintf("delete service probe error, %v", err))
 		return
 	}
+	httputil.ReturnSuccess(r, w, nil)
 }
 
 //Port Port

@@ -29,11 +29,11 @@ func TestCreateNodeManager(t *testing.T) {
 		ListenPorts: option.ListenPorts{
 			HTTP: 80,
 		},
+		EtcdEndpoint: []string{"http://127.0.0.1:2379"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log(nm.localV4Hosts)
 	if ok := nm.checkGatewayPort(); !ok {
 		t.Log("port check is not pass")
 	} else {

@@ -29,6 +29,7 @@ type TenantInterface interface {
 	TenantResources(w http.ResponseWriter, r *http.Request)
 	ServiceResources(w http.ResponseWriter, r *http.Request)
 	Tenant(w http.ResponseWriter, r *http.Request)
+	Tenants(w http.ResponseWriter, r *http.Request)
 	ServicesInfo(w http.ResponseWriter, r *http.Request)
 	TenantsWithResource(w http.ResponseWriter, r *http.Request)
 	TenantsQuery(w http.ResponseWriter, r *http.Request)
@@ -58,7 +59,6 @@ type ServiceInterface interface {
 	PutPorts(w http.ResponseWriter, r *http.Request)
 	PortOuterController(w http.ResponseWriter, r *http.Request)
 	PortInnerController(w http.ResponseWriter, r *http.Request)
-	ChangeLBPort(w http.ResponseWriter, r *http.Request)
 	RollBack(w http.ResponseWriter, r *http.Request)
 	AddVolume(w http.ResponseWriter, r *http.Request)
 	UpdVolume(w http.ResponseWriter, r *http.Request)
@@ -71,6 +71,8 @@ type ServiceInterface interface {
 	ShareResult(w http.ResponseWriter, r *http.Request)
 	BuildVersionInfo(w http.ResponseWriter, r *http.Request)
 	GetDeployVersion(w http.ResponseWriter, r *http.Request)
+	AutoscalerRules(w http.ResponseWriter, r *http.Request)
+	ScalingRecords(w http.ResponseWriter, r *http.Request)
 }
 
 //TenantInterfaceWithV1 funcs for both v2 and v1
@@ -90,12 +92,14 @@ type TenantInterfaceWithV1 interface {
 
 //LogInterface log interface
 type LogInterface interface {
-	Logs(w http.ResponseWriter, r *http.Request)
+	HistoryLogs(w http.ResponseWriter, r *http.Request)
 	LogList(w http.ResponseWriter, r *http.Request)
 	LogFile(w http.ResponseWriter, r *http.Request)
 	LogSocket(w http.ResponseWriter, r *http.Request)
 	LogByAction(w http.ResponseWriter, r *http.Request)
 	TenantLogByAction(w http.ResponseWriter, r *http.Request)
+	Events(w http.ResponseWriter, r *http.Request)
+	EventLog(w http.ResponseWriter, r *http.Request)
 }
 
 //PluginInterface plugin interface
@@ -103,7 +107,7 @@ type PluginInterface interface {
 	PluginAction(w http.ResponseWriter, r *http.Request)
 	PluginDefaultENV(w http.ResponseWriter, r *http.Request)
 	PluginBuild(w http.ResponseWriter, r *http.Request)
-	GetAllPluginBuildVersons(w http.ResponseWriter, r *http.Request)
+	GetAllPluginBuildVersions(w http.ResponseWriter, r *http.Request)
 	GetPluginBuildVersion(w http.ResponseWriter, r *http.Request)
 	DeletePluginBuildVersion(w http.ResponseWriter, r *http.Request)
 	//plugin
@@ -140,6 +144,7 @@ type Gatewayer interface {
 	TCPRule(w http.ResponseWriter, r *http.Request)
 	GetAvailablePort(w http.ResponseWriter, r *http.Request)
 	RuleConfig(w http.ResponseWriter, r *http.Request)
+	Certificate(w http.ResponseWriter, r *http.Request)
 }
 
 // ThirdPartyServicer is an interface for defining methods for third-party service.
@@ -162,4 +167,9 @@ type AppRestoreInterface interface {
 	RestoreDeps(w http.ResponseWriter, r *http.Request)
 	RestoreDepVols(w http.ResponseWriter, r *http.Request)
 	RestorePlugins(w http.ResponseWriter, r *http.Request)
+}
+
+// PodInterface defines api methods about k8s pods.
+type PodInterface interface {
+	PodDetail(w http.ResponseWriter, r *http.Request)
 }

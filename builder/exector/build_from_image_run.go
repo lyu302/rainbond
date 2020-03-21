@@ -22,19 +22,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/goodrain/rainbond/builder"
-
 	"github.com/Sirupsen/logrus"
-	"github.com/goodrain/rainbond/event"
-	"github.com/tidwall/gjson"
-
-	//"github.com/docker/docker/api/types"
-
-	//"github.com/docker/docker/client"
-
 	"github.com/docker/docker/client"
+	"github.com/goodrain/rainbond/builder"
+	"github.com/goodrain/rainbond/builder/build"
 	"github.com/goodrain/rainbond/builder/sources"
 	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/event"
+	"github.com/tidwall/gjson"
 )
 
 //ImageBuildItem ImageBuildItem
@@ -84,7 +79,7 @@ func (i *ImageBuildItem) Run(timeout time.Duration) error {
 		i.Logger.Error(fmt.Sprintf("获取指定镜像: %s失败", i.Image), map[string]string{"step": "builder-exector", "status": "failure"})
 		return err
 	}
-	localImageURL := i.ImageNameHandler(i.Image)
+	localImageURL := build.CreateImageName(i.ServiceID, i.DeployVersion)
 	if err := sources.ImageTag(i.DockerClient, i.Image, localImageURL, i.Logger, 1); err != nil {
 		logrus.Errorf("change image tag error: %s", err.Error())
 		i.Logger.Error(fmt.Sprintf("修改镜像tag: %s -> %s 失败", i.Image, localImageURL), map[string]string{"step": "builder-exector", "status": "failure"})
@@ -104,13 +99,6 @@ func (i *ImageBuildItem) Run(timeout time.Duration) error {
 	return nil
 }
 
-//ImageNameHandler 根据平台配置处理镜像名称
-func (i *ImageBuildItem) ImageNameHandler(source string) string {
-	imageModel := sources.ImageNameHandle(source)
-	localImageURL := fmt.Sprintf("%s/%s:%s", builder.REGISTRYDOMAIN, imageModel.Name, i.DeployVersion)
-	return localImageURL
-}
-
 //StorageVersionInfo 存储version信息
 func (i *ImageBuildItem) StorageVersionInfo(imageURL string) error {
 	version, err := db.GetManager().VersionInfoDao().GetVersionByDeployVersion(i.DeployVersion, i.ServiceID)
@@ -122,6 +110,7 @@ func (i *ImageBuildItem) StorageVersionInfo(imageURL string) error {
 	version.ImageName = imageURL
 	version.RepoURL = i.Image
 	version.FinalStatus = "success"
+	version.FinishTime = time.Now()
 	if err := db.GetManager().VersionInfoDao().UpdateModel(version); err != nil {
 		return err
 	}
@@ -136,6 +125,7 @@ func (i *ImageBuildItem) UpdateVersionInfo(status string) error {
 	}
 	version.FinalStatus = status
 	version.RepoURL = i.Image
+	version.FinishTime = time.Now()
 	if err := db.GetManager().VersionInfoDao().UpdateModel(version); err != nil {
 		return err
 	}

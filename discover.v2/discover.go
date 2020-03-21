@@ -31,6 +31,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 )
 
 //CallbackUpdate 每次返还变化
@@ -51,26 +52,20 @@ type Callback interface {
 
 //Discover 后端服务自动发现
 type Discover interface {
+	// Add project to cache if not exists, then watch the endpoints.
 	AddProject(name string, callback Callback)
+	// Update a project.
 	AddUpdateProject(name string, callback CallbackUpdate)
 	Stop()
 }
 
 //GetDiscover 获取服务发现管理器
 func GetDiscover(opt config.DiscoverConfig) (Discover, error) {
-	if opt.EtcdClusterEndpoints == nil || len(opt.EtcdClusterEndpoints) == 0 {
-		opt.EtcdClusterEndpoints = []string{"127.0.0.1:2379"}
-	}
 	if opt.Ctx == nil {
 		opt.Ctx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(opt.Ctx)
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:        opt.EtcdClusterEndpoints,
-		AutoSyncInterval: time.Second * 30,
-		DialTimeout:      time.Second * 10,
-		Context:          ctx,
-	})
+	client, err := etcdutil.NewClient(ctx, opt.EtcdClientArgs)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -225,7 +220,6 @@ func (e *etcdDiscover) removeProject(name string) {
 func (e *etcdDiscover) discover(name string, callback CallbackUpdate) {
 	ctx, cancel := context.WithCancel(e.ctx)
 	defer cancel()
-	defer e.removeProject(name)
 	endpoints := e.list(name)
 	if endpoints != nil && len(endpoints) > 0 {
 		callback.UpdateEndpoints(config.SYNC, endpoints...)
@@ -238,6 +232,10 @@ func (e *etcdDiscover) discover(name string, callback CallbackUpdate) {
 		case res := <-watch:
 			if err := res.Err(); err != nil {
 				callback.Error(err)
+				logrus.Debugf("monitor discover get watch error: %s, remove this watch target first, and then sleep 10 sec, we will re-watch it", err.Error())
+				e.removeProject(name)
+				time.Sleep(10 * time.Second)
+				e.AddUpdateProject(name, callback)
 				return
 			}
 			for _, event := range res.Events {

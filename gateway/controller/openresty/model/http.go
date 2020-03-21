@@ -18,6 +18,8 @@ type HTTP struct {
 	ProxyBusyBuffersSize Size
 	StatusPort           int
 	UpstreamsDict        Size
+	HTTPListen           int
+	HTTPSListen          int
 }
 
 // LogFormat -
@@ -35,6 +37,8 @@ type AccessLog struct {
 // NewHTTP creates a new model.HTTP
 func NewHTTP(conf *option.Config) *HTTP {
 	return &HTTP{
+		HTTPListen:  conf.ListenPorts.HTTP,
+		HTTPSListen: conf.ListenPorts.HTTPS,
 		DefaultType: "text/html",
 		SendFile:    true,
 		StatusPort:  conf.ListenPorts.Status,
@@ -71,8 +75,8 @@ func NewHTTP(conf *option.Config) *HTTP {
 			Unit: "k",
 		},
 		UpstreamsDict: Size{
-			Num:  128,
-			Unit: "k",
+			Num:  int(conf.ShareMemory),
+			Unit: "m",
 		},
 	}
 }

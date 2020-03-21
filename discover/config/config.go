@@ -19,23 +19,29 @@
 package config
 
 import "context"
+import etcdutil "github.com/goodrain/rainbond/util/etcd"
 
 //Operation 实例操作类型
 type Operation int
 
 const (
+	// ADD add operation
 	ADD Operation = iota
+	// DELETE delete operation
 	DELETE
+	// UPDATE update operation
 	UPDATE
+	// SYNC sync operation
 	SYNC
 )
 
 //DiscoverConfig discover config
 type DiscoverConfig struct {
-	Ctx                  context.Context
-	EtcdClusterEndpoints []string
+	Ctx            context.Context
+	EtcdClientArgs *etcdutil.ClientArgs
 }
 
+// Endpoint endpoint
 type Endpoint struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`

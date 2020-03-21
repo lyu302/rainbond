@@ -23,11 +23,10 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/goodrain/rainbond/node/kubecache"
 
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -99,7 +98,7 @@ func (n *NodeConfig) GetID() string {
 //if return true, snapshot need update
 func (n *NodeConfig) TryUpdate(obj interface{}) (needUpdate bool) {
 	if service, ok := obj.(*corev1.Service); ok {
-		if v, ok := service.Labels["creater"]; !ok || v != "Rainbond" {
+		if v, ok := service.Labels["creator"]; !ok || v != "Rainbond" {
 			return false
 		}
 		if _, ok := n.dependServices.Load(service.Labels["service_id"]); ok {
@@ -107,7 +106,7 @@ func (n *NodeConfig) TryUpdate(obj interface{}) (needUpdate bool) {
 		}
 	}
 	if endpoints, ok := obj.(*corev1.Endpoints); ok {
-		if v, ok := endpoints.Labels["creater"]; !ok || v != "Rainbond" {
+		if v, ok := endpoints.Labels["creator"]; !ok || v != "Rainbond" {
 			return false
 		}
 		if _, ok := n.dependServices.Load(endpoints.Labels["service_id"]); ok {
@@ -176,17 +175,43 @@ func (d *DiscoverServerManager) UpdateNodeConfig(nc *NodeConfig) error {
 	for _, dep := range nc.configModel.BaseServices {
 		nc.dependServices.Store(dep.DependServiceID, true)
 		labelname := fmt.Sprintf("name=%sService", dep.DependServiceAlias)
-		selector, _ := labels.Parse(labelname)
-		upServices, upEndpoints := d.GetServicesAndEndpoints(nc.namespace, selector)
-		services = append(services, upServices...)
-		endpoint = append(endpoint, upEndpoints...)
+		selector, err := labels.Parse(labelname)
+		if err != nil {
+			logrus.Errorf("parse selector %s failure %s", labelname, err.Error())
+		}
+		if selector != nil {
+			upServices, upEndpoints := d.GetServicesAndEndpoints(nc.namespace, selector)
+			for i, service := range upServices {
+				listenPort := service.Spec.Ports[0].Port
+				if value, ok := service.Labels["origin_port"]; ok {
+					origin, _ := strconv.Atoi(value)
+					if origin != 0 {
+						listenPort = int32(origin)
+					}
+				}
+				if listenPort == int32(dep.Port) {
+					services = append(services, upServices[i])
+				}
+			}
+			for i, end := range upEndpoints {
+				if len(end.Subsets) == 0 || len(end.Subsets[0].Ports) == 0 {
+					continue
+				}
+				endpoint = append(endpoint, upEndpoints[i])
+			}
+		}
 	}
 	if nc.configModel.BasePorts != nil && len(nc.configModel.BasePorts) > 0 {
 		labelname := fmt.Sprintf("name=%sServiceOUT", nc.serviceAlias)
-		selector, _ := labels.Parse(labelname)
-		downService, downEndpoint := d.GetServicesAndEndpoints(nc.namespace, selector)
-		services = append(services, downService...)
-		endpoint = append(endpoint, downEndpoint...)
+		selector, err := labels.Parse(labelname)
+		if err != nil {
+			logrus.Errorf("parse selector %s failure %s", labelname, err.Error())
+		}
+		if selector != nil {
+			downService, downEndpoint := d.GetServicesAndEndpoints(nc.namespace, selector)
+			services = append(services, downService...)
+			endpoint = append(endpoint, downEndpoint...)
+		}
 	}
 	listeners, err := conver.OneNodeListerner(nc.serviceAlias, nc.namespace, nc.config, services)
 	if err != nil {
@@ -209,6 +234,8 @@ func (d *DiscoverServerManager) UpdateNodeConfig(nc *NodeConfig) error {
 	} else {
 		nc.endpoints = clusterLoadAssignment
 	}
+	//Fill the configuration information and inject envoy
+	nc.VersionUpdate()
 	return d.setSnapshot(nc)
 }
 
@@ -227,13 +254,13 @@ func (d *DiscoverServerManager) setSnapshot(nc *NodeConfig) error {
 }
 
 //CreateDiscoverServerManager create discover server manager
-func CreateDiscoverServerManager(client kubecache.KubeClient, conf option.Conf) (*DiscoverServerManager, error) {
+func CreateDiscoverServerManager(clientset kubernetes.Interface, conf option.Conf) (*DiscoverServerManager, error) {
 	configcache := cache.NewSnapshotCache(false, Hasher{}, logrus.WithField("module", "config-cache"))
 	ctx, cancel := context.WithCancel(context.Background())
 	dsm := &DiscoverServerManager{
 		server:       server.NewServer(configcache, nil),
 		cacheManager: configcache,
-		kubecli:      client.GetKubeClient(),
+		kubecli:      clientset,
 		conf:         conf,
 		eventChan:    make(chan *Event, 100),
 		pool: &sync.Pool{
@@ -246,7 +273,7 @@ func CreateDiscoverServerManager(client kubecache.KubeClient, conf option.Conf) 
 		queue:  NewQueue(1 * time.Second),
 	}
 	sharedInformers := informers.NewFilteredSharedInformerFactory(dsm.kubecli, time.Second*10, corev1.NamespaceAll, func(options *meta_v1.ListOptions) {
-		options.LabelSelector = "creater=Rainbond"
+		options.LabelSelector = "creator=Rainbond"
 	})
 	svcInformer := sharedInformers.Core().V1().Services().Informer()
 	dsm.services = dsm.createCacheHandler(svcInformer, "Services")
@@ -371,8 +398,6 @@ func (d *DiscoverServerManager) AddNodeConfig(nc *NodeConfig) {
 	if !exist {
 		d.cacheNodeConfig = append(d.cacheNodeConfig, nc)
 	}
-	//Fill the configuration information and inject envoy
-	nc.VersionUpdate()
 	if err := d.UpdateNodeConfig(nc); err != nil {
 		logrus.Errorf("update envoy node(%s) config failue %s", nc.GetID(), err.Error())
 	}

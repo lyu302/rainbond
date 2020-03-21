@@ -54,6 +54,7 @@ func Routers(mode string) *chi.Mux {
 		})
 		r.Route("/localvolumes", func(r chi.Router) {
 			r.Post("/create", controller.CreateLocalVolume)
+			r.Delete("/", controller.DeleteLocalVolume)
 		})
 		//以下只有管理节点具有的API
 		if mode == "master" {
@@ -66,6 +67,7 @@ func Routers(mode string) *chi.Mux {
 				r.Get("/service-health", controller.GetServicesHealthy)
 			})
 			r.Route("/nodes", func(r chi.Router) {
+				// abandoned
 				r.Get("/fullres", controller.ClusterInfo)
 				r.Get("/{node_id}/node_resource", controller.GetNodeResource)
 				r.Get("/resources", controller.Resources)
@@ -77,8 +79,9 @@ func Routers(mode string) *chi.Mux {
 				r.Put("/{node_id}/status", controller.UpdateNodeStatus)
 				r.Put("/{node_id}/unschedulable", controller.Cordon)
 				r.Put("/{node_id}/reschedulable", controller.UnCordon)
-				r.Put("/{node_id}/labels", controller.PutLabel)
+				r.Post("/{node_id}/labels", controller.PutLabel)
 				r.Get("/{node_id}/labels", controller.GetLabel)
+				r.Delete("/{node_id}/labels", controller.DeleteLabel)
 				r.Post("/{node_id}/down", controller.DownNode)
 				r.Post("/{node_id}/up", controller.UpNode)
 				r.Get("/{node_id}/instance", controller.Instances)

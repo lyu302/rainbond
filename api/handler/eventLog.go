@@ -26,41 +26,44 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path"
 
-	"github.com/goodrain/rainbond/util"
-
+	"github.com/coreos/etcd/clientv3"
+	"github.com/goodrain/rainbond/api/model"
 	api_model "github.com/goodrain/rainbond/api/model"
-
-	"github.com/Sirupsen/logrus"
-
-	"github.com/coreos/etcd/client"
-
-	"os/exec"
-
+	"github.com/goodrain/rainbond/db"
+	dbmodel "github.com/goodrain/rainbond/db/model"
 	eventdb "github.com/goodrain/rainbond/eventlog/db"
+	"github.com/goodrain/rainbond/util/constants"
 )
 
 //LogAction  log action struct
 type LogAction struct {
-	EtcdEndpoints []string
-	eventdb       *eventdb.EventFilePlugin
+	EtcdCli *clientv3.Client
+	eventdb *eventdb.EventFilePlugin
 }
 
 //CreateLogManager get log manager
-func CreateLogManager(etcdEndpoint []string) *LogAction {
+func CreateLogManager(cli *clientv3.Client) *LogAction {
 	return &LogAction{
-		EtcdEndpoints: etcdEndpoint,
+		EtcdCli: cli,
 		eventdb: &eventdb.EventFilePlugin{
 			HomePath: "/grdata/logs/",
 		},
 	}
 }
 
+// GetEvents get target logs
+func (l *LogAction) GetEvents(target, targetID string, page, size int) ([]*dbmodel.ServiceEvent, int, error) {
+	if target == "tenant" {
+		return db.GetManager().ServiceEventDao().GetEventsByTenantID(targetID, (page-1)*size, size)
+	}
+	return db.GetManager().ServiceEventDao().GetEventsByTarget(target, targetID, (page-1)*size, size)
+}
+
 //GetLogList get log list
-func (l *LogAction) GetLogList(serviceAlias string) ([]string, error) {
-	downLoadDIR := "/grdata/downloads"
-	urlPath := fmt.Sprintf("/log/%s", serviceAlias)
-	logDIR := fmt.Sprintf("%s%s", downLoadDIR, urlPath)
+func (l *LogAction) GetLogList(serviceAlias string) ([]*model.HistoryLogFile, error) {
+	logDIR := path.Join(constants.GrdataLogPath, serviceAlias)
 	_, err := os.Stat(logDIR)
 	if os.IsNotExist(err) {
 		return nil, err
@@ -69,25 +72,22 @@ func (l *LogAction) GetLogList(serviceAlias string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var logList []string
-	if len(fileList) == 0 {
-		return logList, nil
-	}
 
+	var logFiles []*model.HistoryLogFile
 	for _, file := range fileList {
-		filePath := fmt.Sprintf("/logs/%s/%s", serviceAlias, file.Name())
-		logrus.Debugf("filepath is %s", file.Name())
-		logList = append(logList, filePath)
+		logfile := &model.HistoryLogFile{
+			Filename:     file.Name(),
+			RelativePath: path.Join("logs", serviceAlias, file.Name()),
+		}
+		logFiles = append(logFiles, logfile)
 	}
-	return logList, nil
+	return logFiles, nil
 }
 
 //GetLogFile GetLogFile
 func (l *LogAction) GetLogFile(serviceAlias, fileName string) (string, string, error) {
-	downLoadDIR := "/grdata/downloads"
-	urlPath := fmt.Sprintf("/log/%s", serviceAlias)
-	fullPath := fmt.Sprintf("%s%s/%s", downLoadDIR, urlPath, fileName)
-	logPath := fmt.Sprintf("%s/log/%s", downLoadDIR, serviceAlias)
+	logPath := path.Join(constants.GrdataLogPath, serviceAlias)
+	fullPath := path.Join(logPath, fileName)
 	_, err := os.Stat(fullPath)
 	if os.IsNotExist(err) {
 		return "", "", err
@@ -97,67 +97,36 @@ func (l *LogAction) GetLogFile(serviceAlias, fileName string) (string, string, e
 
 //GetLogInstance get log web socket instance
 func (l *LogAction) GetLogInstance(serviceID string) (string, error) {
-	//etcd V2
-	etcdclient, err := client.New(client.Config{
-		Endpoints: l.EtcdEndpoints,
-	})
+	value, err := l.EtcdCli.Get(context.Background(), fmt.Sprintf("/event/dockerloginstacne/%s", serviceID))
 	if err != nil {
 		return "", err
+	}
+	if len(value.Kvs) > 0 {
+		return string(value.Kvs[0].Value), nil
 	}
 
-	value, err := client.NewKeysAPI(etcdclient).Get(context.Background(),
-		fmt.Sprintf("/event/dockerloginstacne/%s", serviceID),
-		nil)
-	if err != nil {
-		return "", err
-	}
-	return value.Node.Value, nil
-	/*
-	   @ etcd V3 使用
-	   	ctx, cancel := context.WithCancel(context.Background())
-	   	defer cancel()
-	   	etcdclientv3, err := clientv2.New(clientv3.Config{
-	   		Endpoints: l.EtcdEndpoints,
-	   	})
-	   	value, err := etcdclientv3.Get(ctx, fmt.Sprintf("/event/dockerloginstacne/%s", serviceID))
-	   	if err != nil {
-	   		return "", err
-	   	}
-	   	if len(value.Kvs) == 0 {
-	   		return "", errors.New("have no value")
-	   	}
-	   	return string(value.Kvs[0].Value), nil
-	*/
+	return "", nil
 }
 
-//GetLevelLog 获取指定操作的操作日志
+//GetLevelLog get event log
 func (l *LogAction) GetLevelLog(eventID string, level string) (*api_model.DataLog, error) {
-	messageList, err := l.eventdb.GetMessages(eventID, level)
+	re, err := l.eventdb.GetMessages(eventID, level, 0)
 	if err != nil {
 		return nil, err
+	}
+	if re != nil {
+		messageList, ok := re.(eventdb.MessageDataList)
+		if ok {
+			return &api_model.DataLog{
+				Status: "success",
+				Data:   messageList,
+			}, nil
+		}
 	}
 	return &api_model.DataLog{
 		Status: "success",
-		Data:   messageList,
+		Data:   nil,
 	}, nil
-}
-
-//GetLinesLogs GetLinesLogs
-func (l *LogAction) GetLinesLogs(alias string, n int) ([]byte, error) {
-
-	downLoadDIR := "/grdata/downloads"
-	filePath := fmt.Sprintf("%s/log/%s/stdout.log", downLoadDIR, alias)
-	if ok, err := util.FileExists(filePath); !ok {
-		if err != nil {
-			logrus.Errorf("check file exist error %s", err.Error())
-		}
-		return []byte(""), nil
-	}
-	f, err := exec.Command("tail", "-n", fmt.Sprintf("%d", n), filePath).Output()
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
 }
 
 //Decompress zlib解码

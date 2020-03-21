@@ -24,12 +24,15 @@ import (
 	"strconv"
 
 	"github.com/Sirupsen/logrus"
+	v1 "k8s.io/api/apps/v1"
+	v2beta1 "k8s.io/api/autoscaling/v2beta1"
+	corev1 "k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
+	storagev1 "k8s.io/api/storage/v1"
+
 	"github.com/goodrain/rainbond/builder"
 	"github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/event"
-	v1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
 )
 
 // EventType type of event
@@ -98,22 +101,27 @@ type AppServiceBase struct {
 //AppService a service of rainbond app state in kubernetes
 type AppService struct {
 	AppServiceBase
-	tenant       *corev1.Namespace
-	statefulset  *v1.StatefulSet
-	deployment   *v1.Deployment
-	replicasets  []*v1.ReplicaSet
-	services     []*corev1.Service
-	delServices  []*corev1.Service
-	endpoints    []*corev1.Endpoints
-	configMaps   []*corev1.ConfigMap
-	ingresses    []*extensions.Ingress
-	delIngs      []*extensions.Ingress // ingresses which need to be deleted
-	secrets      []*corev1.Secret
-	delSecrets   []*corev1.Secret // secrets which need to be deleted
-	pods         []*corev1.Pod
-	status       AppServiceStatus
-	Logger       event.Logger
-	UpgradePatch map[string][]byte
+	tenant         *corev1.Namespace
+	statefulset    *v1.StatefulSet
+	deployment     *v1.Deployment
+	hpas           []*v2beta1.HorizontalPodAutoscaler
+	delHPAs        []*v2beta1.HorizontalPodAutoscaler
+	replicasets    []*v1.ReplicaSet
+	services       []*corev1.Service
+	delServices    []*corev1.Service
+	endpoints      []*corev1.Endpoints
+	configMaps     []*corev1.ConfigMap
+	ingresses      []*extensions.Ingress
+	delIngs        []*extensions.Ingress // ingresses which need to be deleted
+	secrets        []*corev1.Secret
+	delSecrets     []*corev1.Secret // secrets which need to be deleted
+	pods           []*corev1.Pod
+	claims         []*corev1.PersistentVolumeClaim
+	status         AppServiceStatus
+	Logger         event.Logger
+	storageClasses []*storagev1.StorageClass
+	UpgradePatch   map[string][]byte
+	CustomParams   map[string]string
 }
 
 //CacheKey app cache key
@@ -143,6 +151,7 @@ func (a *AppService) SetDeployment(d *v1.Deployment) {
 	if v, ok := d.Spec.Template.Labels["version"]; ok && v != "" {
 		a.DeployVersion = v
 	}
+	a.Replicas = int(*d.Spec.Replicas)
 }
 
 //DeleteDeployment delete kubernetes deployment model
@@ -161,6 +170,7 @@ func (a *AppService) SetStatefulSet(d *v1.StatefulSet) {
 	if v, ok := d.Spec.Template.Labels["version"]; ok && v != "" {
 		a.DeployVersion = v
 	}
+	a.Replicas = int(*d.Spec.Replicas)
 }
 
 //SetReplicaSets set kubernetes replicaset
@@ -189,6 +199,20 @@ func (a *AppService) DeleteReplicaSet(d *v1.ReplicaSet) {
 //GetReplicaSets get replicaset
 func (a *AppService) GetReplicaSets() []*v1.ReplicaSet {
 	return a.replicasets
+}
+
+// GetNewestReplicaSet returns the newest replica set.
+func (a *AppService) GetNewestReplicaSet() (newest *v1.ReplicaSet) {
+	if len(a.replicasets) == 0 {
+		return
+	}
+	newest = a.replicasets[0]
+	for _, rs := range a.replicasets {
+		if newest.ObjectMeta.CreationTimestamp.Before(&rs.ObjectMeta.CreationTimestamp) {
+			newest = rs
+		}
+	}
+	return
 }
 
 //GetReplicaSetVersion get rs version
@@ -270,7 +294,11 @@ func (a *AppService) SetServices(svcs []*corev1.Service) {
 }
 
 //GetServices get services
-func (a *AppService) GetServices() []*corev1.Service {
+func (a *AppService) GetServices(canCopy bool) []*corev1.Service {
+	if canCopy {
+		cr := make([]*corev1.Service, len(a.services))
+		copy(cr, a.services[0:])
+	}
 	return a.services
 }
 
@@ -303,7 +331,11 @@ func (a *AppService) AddEndpoints(ep *corev1.Endpoints) {
 }
 
 // GetEndpoints returns endpoints in AppService
-func (a *AppService) GetEndpoints() []*corev1.Endpoints {
+func (a *AppService) GetEndpoints(canCopy bool) []*corev1.Endpoints {
+	if canCopy {
+		cr := make([]*corev1.Endpoints, len(a.endpoints))
+		copy(cr, a.endpoints[0:])
+	}
 	return a.endpoints
 }
 
@@ -328,7 +360,12 @@ func (a *AppService) DelEndpoints(ep *corev1.Endpoints) {
 }
 
 //GetIngress get ingress
-func (a *AppService) GetIngress() []*extensions.Ingress {
+func (a *AppService) GetIngress(canCopy bool) []*extensions.Ingress {
+	if canCopy {
+		cr := make([]*extensions.Ingress, len(a.ingresses))
+		copy(cr, a.ingresses[0:])
+		return cr
+	}
 	return a.ingresses
 }
 
@@ -423,7 +460,11 @@ func (a *AppService) DeleteSecrets(d *corev1.Secret) {
 }
 
 //GetSecrets get secrets
-func (a *AppService) GetSecrets() []*corev1.Secret {
+func (a *AppService) GetSecrets(canCopy bool) []*corev1.Secret {
+	if canCopy {
+		cr := make([]*corev1.Secret, len(a.secrets))
+		copy(cr, a.secrets[0:])
+	}
 	return a.secrets
 }
 
@@ -456,8 +497,22 @@ func (a *AppService) DeletePods(d *corev1.Pod) {
 }
 
 //GetPods get pods
-func (a *AppService) GetPods() []*corev1.Pod {
+func (a *AppService) GetPods(canCopy bool) []*corev1.Pod {
+	if canCopy {
+		cr := make([]*corev1.Pod, len(a.pods))
+		copy(cr, a.pods[0:])
+	}
 	return a.pods
+}
+
+// GetPodsByName returns the pod based on podname.
+func (a *AppService) GetPodsByName(podname string) *corev1.Pod {
+	for _, pod := range a.pods {
+		if pod.ObjectMeta.Name == podname {
+			return pod
+		}
+	}
+	return nil
 }
 
 //SetTenant set tenant
@@ -476,9 +531,9 @@ func (a *AppService) SetDeletedResources(old *AppService) {
 		logrus.Debugf("empty old app service.")
 		return
 	}
-	for _, o := range old.GetIngress() {
+	for _, o := range old.GetIngress(true) {
 		del := true
-		for _, n := range a.GetIngress() {
+		for _, n := range a.GetIngress(true) {
 			if o.Name == n.Name {
 				del = false
 				break
@@ -488,9 +543,9 @@ func (a *AppService) SetDeletedResources(old *AppService) {
 			a.delIngs = append(a.delIngs, o)
 		}
 	}
-	for _, o := range old.GetSecrets() {
+	for _, o := range old.GetSecrets(true) {
 		del := true
-		for _, n := range a.GetSecrets() {
+		for _, n := range a.GetSecrets(true) {
 			if o.Name == n.Name {
 				del = false
 				break
@@ -500,9 +555,9 @@ func (a *AppService) SetDeletedResources(old *AppService) {
 			a.delSecrets = append(a.delSecrets, o)
 		}
 	}
-	for _, o := range old.GetServices() {
+	for _, o := range old.GetServices(true) {
 		del := true
-		for _, n := range a.GetServices() {
+		for _, n := range a.GetServices(true) {
 			if o.Name == n.Name {
 				del = false
 				break
@@ -510,6 +565,126 @@ func (a *AppService) SetDeletedResources(old *AppService) {
 		}
 		if del {
 			a.delServices = append(a.delServices, o)
+		}
+	}
+	for _, o := range old.GetHPAs() {
+		del := true
+		for _, n := range a.GetHPAs() {
+			if o.Name == n.Name {
+				del = false
+				break
+			}
+		}
+		if del {
+			a.delHPAs = append(a.delHPAs, o)
+		}
+	}
+}
+
+// DistinguishPod uses replica set to distinguish between old and new pods
+// true: new pod; false: old pod.
+func (a *AppService) DistinguishPod(pod *corev1.Pod) bool {
+	rss := a.GetNewestReplicaSet()
+	if rss == nil {
+		return true
+	}
+	return !pod.ObjectMeta.CreationTimestamp.Before(&rss.ObjectMeta.CreationTimestamp)
+}
+
+// GetClaims get claims
+func (a *AppService) GetClaims() []*corev1.PersistentVolumeClaim {
+	return a.claims
+}
+
+// SetClaim set claim
+func (a *AppService) SetClaim(claim *corev1.PersistentVolumeClaim) {
+	claim.Namespace = a.TenantID
+	if len(a.claims) > 0 {
+		for i, c := range a.claims {
+			if c.GetName() == claim.GetName() {
+				a.claims[i] = claim
+				return
+			}
+		}
+	}
+	a.claims = append(a.claims, claim)
+}
+
+// DeleteClaim delete claim
+func (a *AppService) DeleteClaim(claim *corev1.PersistentVolumeClaim) {
+	if len(a.claims) == 0 {
+		return
+	}
+	for i, c := range a.claims {
+		if c.GetName() == claim.GetName() {
+			a.claims = append(a.claims[0:i], a.claims[i+1:]...)
+			return
+		}
+	}
+}
+
+// SetHPAs -
+func (a *AppService) SetHPAs(hpas []*v2beta1.HorizontalPodAutoscaler) {
+	a.hpas = hpas
+}
+
+// SetHPA -
+func (a *AppService) SetHPA(hpa *v2beta1.HorizontalPodAutoscaler) {
+	if len(a.hpas) > 0 {
+		for i, old := range a.hpas {
+			if old.GetName() == hpa.GetName() {
+				a.hpas[i] = hpa
+				return
+			}
+		}
+	}
+	a.hpas = append(a.hpas, hpa)
+}
+
+// GetHPAs -
+func (a *AppService) GetHPAs() []*v2beta1.HorizontalPodAutoscaler {
+	return a.hpas
+}
+
+// GetDelHPAs -
+func (a *AppService) GetDelHPAs() []*v2beta1.HorizontalPodAutoscaler {
+	return a.delHPAs
+}
+
+// DelHPA -
+func (a *AppService) DelHPA(hpa *v2beta1.HorizontalPodAutoscaler) {
+	if len(a.hpas) == 0 {
+		return
+	}
+	for i, old := range a.hpas {
+		if old.GetName() == hpa.GetName() {
+			a.hpas = append(a.hpas[0:i], a.hpas[i+1:]...)
+			return
+		}
+	}
+}
+
+// SetStorageClass set storageclass
+func (a *AppService) SetStorageClass(sc *storagev1.StorageClass) {
+	if len(a.storageClasses) > 0 {
+		for i, old := range a.storageClasses {
+			if old.Name == sc.GetName() {
+				a.storageClasses[i] = sc
+			}
+		}
+	}
+	a.storageClasses = append(a.storageClasses, sc)
+}
+
+// DeleteStorageClass deelete storageclass
+func (a *AppService) DeleteStorageClass(sc *storagev1.StorageClass) {
+	if len(a.storageClasses) == 0 {
+		return
+	}
+	for i, old := range a.storageClasses {
+		if old.Name == sc.GetName() {
+			a.storageClasses = append(a.storageClasses[0:i], a.storageClasses[i+1:]...)
+			return
 		}
 	}
 }

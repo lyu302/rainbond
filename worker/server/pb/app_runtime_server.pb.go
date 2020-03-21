@@ -22,6 +22,94 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
 
+type ServiceVolumeStatus int32
+
+const (
+	ServiceVolumeStatus_READY     ServiceVolumeStatus = 0
+	ServiceVolumeStatus_NOT_READY ServiceVolumeStatus = 1
+)
+
+var ServiceVolumeStatus_name = map[int32]string{
+	0: "READY",
+	1: "NOT_READY",
+}
+
+var ServiceVolumeStatus_value = map[string]int32{
+	"READY":     0,
+	"NOT_READY": 1,
+}
+
+func (x ServiceVolumeStatus) String() string {
+	return proto.EnumName(ServiceVolumeStatus_name, int32(x))
+}
+
+func (ServiceVolumeStatus) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{0}
+}
+
+type PodStatus_Type int32
+
+const (
+	// PENDING means the pod has been accepted by the system, but one or more of the containers
+	// has not been started. This includes time before being bound to a node, as well as time spent
+	// pulling images onto the host.
+	PodStatus_PENDING PodStatus_Type = 0
+	// RUNNING means the pod has been bound to a node and all of the containers have been started.
+	// At least one container is still running or is in the process of being restarted.
+	PodStatus_RUNNING PodStatus_Type = 1
+	// SUCCEEDED means that all containers in the pod have voluntarily terminated
+	// with a container exit code of 0, and the system is not going to restart any of these containers.
+	PodStatus_SUCCEEDED PodStatus_Type = 2
+	// FAILED means that all containers in the pod have terminated, and at least one container has
+	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
+	PodStatus_FAILED PodStatus_Type = 3
+	// UNKNOWN means that for some reason the state of the pod could not be obtained, typically due
+	// to an error in communicating with the host of the pod.
+	PodStatus_UNKNOWN    PodStatus_Type = 4
+	PodStatus_TEMINATING PodStatus_Type = 5
+	PodStatus_ABNORMAL   PodStatus_Type = 6
+	PodStatus_INITIATING PodStatus_Type = 7
+	PodStatus_SCHEDULING PodStatus_Type = 8
+	PodStatus_NOTREADY   PodStatus_Type = 9
+	PodStatus_UNHEALTHY  PodStatus_Type = 10
+)
+
+var PodStatus_Type_name = map[int32]string{
+	0:  "PENDING",
+	1:  "RUNNING",
+	2:  "SUCCEEDED",
+	3:  "FAILED",
+	4:  "UNKNOWN",
+	5:  "TEMINATING",
+	6:  "ABNORMAL",
+	7:  "INITIATING",
+	8:  "SCHEDULING",
+	9:  "NOTREADY",
+	10: "UNHEALTHY",
+}
+
+var PodStatus_Type_value = map[string]int32{
+	"PENDING":    0,
+	"RUNNING":    1,
+	"SUCCEEDED":  2,
+	"FAILED":     3,
+	"UNKNOWN":    4,
+	"TEMINATING": 5,
+	"ABNORMAL":   6,
+	"INITIATING": 7,
+	"SCHEDULING": 8,
+	"NOTREADY":   9,
+	"UNHEALTHY":  10,
+}
+
+func (x PodStatus_Type) String() string {
+	return proto.EnumName(PodStatus_Type_name, int32(x))
+}
+
+func (PodStatus_Type) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{19, 0}
+}
+
 type Empty struct {
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -249,7 +337,8 @@ func (m *DiskMessage) GetDisks() map[string]float64 {
 }
 
 type ServiceAppPodList struct {
-	Pods                 []*ServiceAppPod `protobuf:"bytes,1,rep,name=pods,proto3" json:"pods,omitempty"`
+	OldPods              []*ServiceAppPod `protobuf:"bytes,1,rep,name=oldPods,proto3" json:"oldPods,omitempty"`
+	NewPods              []*ServiceAppPod `protobuf:"bytes,2,rep,name=newPods,proto3" json:"newPods,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
 	XXX_unrecognized     []byte           `json:"-"`
 	XXX_sizecache        int32            `json:"-"`
@@ -280,9 +369,16 @@ func (m *ServiceAppPodList) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_ServiceAppPodList proto.InternalMessageInfo
 
-func (m *ServiceAppPodList) GetPods() []*ServiceAppPod {
+func (m *ServiceAppPodList) GetOldPods() []*ServiceAppPod {
 	if m != nil {
-		return m.Pods
+		return m.OldPods
+	}
+	return nil
+}
+
+func (m *ServiceAppPodList) GetNewPods() []*ServiceAppPod {
+	if m != nil {
+		return m.NewPods
 	}
 	return nil
 }
@@ -295,6 +391,7 @@ type ServiceAppPod struct {
 	PodIp                string                `protobuf:"bytes,5,opt,name=pod_ip,json=podIp,proto3" json:"pod_ip,omitempty"`
 	PodStatus            string                `protobuf:"bytes,6,opt,name=pod_status,json=podStatus,proto3" json:"pod_status,omitempty"`
 	Containers           map[string]*Container `protobuf:"bytes,7,rep,name=containers,proto3" json:"containers,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	PodVolumes           []string              `protobuf:"bytes,8,rep,name=pod_volumes,json=podVolumes,proto3" json:"pod_volumes,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}              `json:"-"`
 	XXX_unrecognized     []byte                `json:"-"`
 	XXX_sizecache        int32                 `json:"-"`
@@ -374,6 +471,13 @@ func (m *ServiceAppPod) GetContainers() map[string]*Container {
 	return nil
 }
 
+func (m *ServiceAppPod) GetPodVolumes() []string {
+	if m != nil {
+		return m.PodVolumes
+	}
+	return nil
+}
+
 type Container struct {
 	ContainerName        string   `protobuf:"bytes,1,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
 	MemoryLimit          int64    `protobuf:"varint,2,opt,name=memory_limit,json=memoryLimit,proto3" json:"memory_limit,omitempty"`
@@ -425,13 +529,14 @@ type DeployInfo struct {
 	Namespace            string            `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	Statefuleset         string            `protobuf:"bytes,2,opt,name=statefuleset,proto3" json:"statefuleset,omitempty"`
 	Deployment           string            `protobuf:"bytes,3,opt,name=deployment,proto3" json:"deployment,omitempty"`
-	Pods                 map[string]string `protobuf:"bytes,4,rep,name=pods,proto3" json:"pods,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Services             map[string]string `protobuf:"bytes,5,rep,name=services,proto3" json:"services,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Endpoints            map[string]string `protobuf:"bytes,6,rep,name=endpoints,proto3" json:"endpoints,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Secrets              map[string]string `protobuf:"bytes,7,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Ingresses            map[string]string `protobuf:"bytes,8,rep,name=ingresses,proto3" json:"ingresses,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Replicatset          map[string]string `protobuf:"bytes,9,rep,name=replicatset,proto3" json:"replicatset,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	Status               string            `protobuf:"bytes,10,opt,name=status,proto3" json:"status,omitempty"`
+	StartTime            string            `protobuf:"bytes,4,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	Pods                 map[string]string `protobuf:"bytes,5,rep,name=pods,proto3" json:"pods,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Services             map[string]string `protobuf:"bytes,6,rep,name=services,proto3" json:"services,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Endpoints            map[string]string `protobuf:"bytes,7,rep,name=endpoints,proto3" json:"endpoints,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Secrets              map[string]string `protobuf:"bytes,8,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Ingresses            map[string]string `protobuf:"bytes,9,rep,name=ingresses,proto3" json:"ingresses,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Replicatset          map[string]string `protobuf:"bytes,10,rep,name=replicatset,proto3" json:"replicatset,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	Status               string            `protobuf:"bytes,11,opt,name=status,proto3" json:"status,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
 	XXX_unrecognized     []byte            `json:"-"`
 	XXX_sizecache        int32             `json:"-"`
@@ -479,6 +584,13 @@ func (m *DeployInfo) GetStatefuleset() string {
 func (m *DeployInfo) GetDeployment() string {
 	if m != nil {
 		return m.Deployment
+	}
+	return ""
+}
+
+func (m *DeployInfo) GetStartTime() string {
+	if m != nil {
+		return m.StartTime
 	}
 	return ""
 }
@@ -533,18 +645,20 @@ func (m *DeployInfo) GetStatus() string {
 }
 
 type TenantResource struct {
-	CpuRequest           int64    `protobuf:"varint,1,opt,name=cpu_request,json=cpuRequest,proto3" json:"cpu_request,omitempty"`
-	CpuLimit             int64    `protobuf:"varint,2,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
-	MemoryRequest        int64    `protobuf:"varint,3,opt,name=memory_request,json=memoryRequest,proto3" json:"memory_request,omitempty"`
-	MemoryLimit          int64    `protobuf:"varint,4,opt,name=memory_limit,json=memoryLimit,proto3" json:"memory_limit,omitempty"`
-	RunningAppNum        int64    `protobuf:"varint,5,opt,name=running_app_num,json=runningAppNum,proto3" json:"running_app_num,omitempty"`
-	UnscdCpuReq          int64    `protobuf:"varint,6,opt,name=unscd_cpu_req,json=unscdCpuReq,proto3" json:"unscd_cpu_req,omitempty"`
-	UnscdCpuLimit        int64    `protobuf:"varint,7,opt,name=unscd_cpu_limit,json=unscdCpuLimit,proto3" json:"unscd_cpu_limit,omitempty"`
-	UnscdMemoryReq       int64    `protobuf:"varint,8,opt,name=unscd_memory_req,json=unscdMemoryReq,proto3" json:"unscd_memory_req,omitempty"`
-	UnscdMemoryLimit     int64    `protobuf:"varint,9,opt,name=unscd_memory_limit,json=unscdMemoryLimit,proto3" json:"unscd_memory_limit,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+	CpuRequest            int64    `protobuf:"varint,1,opt,name=cpu_request,json=cpuRequest,proto3" json:"cpu_request,omitempty"`
+	CpuLimit              int64    `protobuf:"varint,2,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
+	MemoryRequest         int64    `protobuf:"varint,3,opt,name=memory_request,json=memoryRequest,proto3" json:"memory_request,omitempty"`
+	MemoryLimit           int64    `protobuf:"varint,4,opt,name=memory_limit,json=memoryLimit,proto3" json:"memory_limit,omitempty"`
+	RunningAppNum         int64    `protobuf:"varint,5,opt,name=running_app_num,json=runningAppNum,proto3" json:"running_app_num,omitempty"`
+	UnscdCpuReq           int64    `protobuf:"varint,6,opt,name=unscd_cpu_req,json=unscdCpuReq,proto3" json:"unscd_cpu_req,omitempty"`
+	UnscdCpuLimit         int64    `protobuf:"varint,7,opt,name=unscd_cpu_limit,json=unscdCpuLimit,proto3" json:"unscd_cpu_limit,omitempty"`
+	UnscdMemoryReq        int64    `protobuf:"varint,8,opt,name=unscd_memory_req,json=unscdMemoryReq,proto3" json:"unscd_memory_req,omitempty"`
+	UnscdMemoryLimit      int64    `protobuf:"varint,9,opt,name=unscd_memory_limit,json=unscdMemoryLimit,proto3" json:"unscd_memory_limit,omitempty"`
+	RunningAppThirdNum    int64    `protobuf:"varint,10,opt,name=running_app_third_num,json=runningAppThirdNum,proto3" json:"running_app_third_num,omitempty"`
+	RunningAppInternalNum int64    `protobuf:"varint,11,opt,name=running_app_internal_num,json=runningAppInternalNum,proto3" json:"running_app_internal_num,omitempty"`
+	XXX_NoUnkeyedLiteral  struct{} `json:"-"`
+	XXX_unrecognized      []byte   `json:"-"`
+	XXX_sizecache         int32    `json:"-"`
 }
 
 func (m *TenantResource) Reset()         { *m = TenantResource{} }
@@ -631,6 +745,20 @@ func (m *TenantResource) GetUnscdMemoryReq() int64 {
 func (m *TenantResource) GetUnscdMemoryLimit() int64 {
 	if m != nil {
 		return m.UnscdMemoryLimit
+	}
+	return 0
+}
+
+func (m *TenantResource) GetRunningAppThirdNum() int64 {
+	if m != nil {
+		return m.RunningAppThirdNum
+	}
+	return 0
+}
+
+func (m *TenantResource) GetRunningAppInternalNum() int64 {
+	if m != nil {
+		return m.RunningAppInternalNum
 	}
 	return 0
 }
@@ -780,6 +908,8 @@ func (m *UpdThirdPartyEndpointsReq) GetIsOnline() bool {
 type DelThirdPartyEndpointsReq struct {
 	Uuid                 string   `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"`
 	Sid                  string   `protobuf:"bytes,2,opt,name=sid,proto3" json:"sid,omitempty"`
+	Ip                   string   `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	Port                 int32    `protobuf:"varint,4,opt,name=port,proto3" json:"port,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -822,6 +952,20 @@ func (m *DelThirdPartyEndpointsReq) GetSid() string {
 		return m.Sid
 	}
 	return ""
+}
+
+func (m *DelThirdPartyEndpointsReq) GetIp() string {
+	if m != nil {
+		return m.Ip
+	}
+	return ""
+}
+
+func (m *DelThirdPartyEndpointsReq) GetPort() int32 {
+	if m != nil {
+		return m.Port
+	}
+	return 0
 }
 
 type ThirdPartyEndpoint struct {
@@ -942,7 +1086,686 @@ func (m *ThirdPartyEndpoints) GetObj() []*ThirdPartyEndpoint {
 	return nil
 }
 
+type ListPodsBySIDReq struct {
+	Sid                  string   `protobuf:"bytes,1,opt,name=sid,proto3" json:"sid,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *ListPodsBySIDReq) Reset()         { *m = ListPodsBySIDReq{} }
+func (m *ListPodsBySIDReq) String() string { return proto.CompactTextString(m) }
+func (*ListPodsBySIDReq) ProtoMessage()    {}
+func (*ListPodsBySIDReq) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{16}
+}
+
+func (m *ListPodsBySIDReq) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_ListPodsBySIDReq.Unmarshal(m, b)
+}
+func (m *ListPodsBySIDReq) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_ListPodsBySIDReq.Marshal(b, m, deterministic)
+}
+func (m *ListPodsBySIDReq) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ListPodsBySIDReq.Merge(m, src)
+}
+func (m *ListPodsBySIDReq) XXX_Size() int {
+	return xxx_messageInfo_ListPodsBySIDReq.Size(m)
+}
+func (m *ListPodsBySIDReq) XXX_DiscardUnknown() {
+	xxx_messageInfo_ListPodsBySIDReq.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ListPodsBySIDReq proto.InternalMessageInfo
+
+func (m *ListPodsBySIDReq) GetSid() string {
+	if m != nil {
+		return m.Sid
+	}
+	return ""
+}
+
+type GetPodDetailReq struct {
+	Sid                  string   `protobuf:"bytes,1,opt,name=sid,proto3" json:"sid,omitempty"`
+	PodName              string   `protobuf:"bytes,2,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *GetPodDetailReq) Reset()         { *m = GetPodDetailReq{} }
+func (m *GetPodDetailReq) String() string { return proto.CompactTextString(m) }
+func (*GetPodDetailReq) ProtoMessage()    {}
+func (*GetPodDetailReq) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{17}
+}
+
+func (m *GetPodDetailReq) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GetPodDetailReq.Unmarshal(m, b)
+}
+func (m *GetPodDetailReq) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GetPodDetailReq.Marshal(b, m, deterministic)
+}
+func (m *GetPodDetailReq) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GetPodDetailReq.Merge(m, src)
+}
+func (m *GetPodDetailReq) XXX_Size() int {
+	return xxx_messageInfo_GetPodDetailReq.Size(m)
+}
+func (m *GetPodDetailReq) XXX_DiscardUnknown() {
+	xxx_messageInfo_GetPodDetailReq.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GetPodDetailReq proto.InternalMessageInfo
+
+func (m *GetPodDetailReq) GetSid() string {
+	if m != nil {
+		return m.Sid
+	}
+	return ""
+}
+
+func (m *GetPodDetailReq) GetPodName() string {
+	if m != nil {
+		return m.PodName
+	}
+	return ""
+}
+
+type PodEvent struct {
+	Type                 string   `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	Reason               string   `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	Age                  string   `protobuf:"bytes,3,opt,name=age,proto3" json:"age,omitempty"`
+	Message              string   `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *PodEvent) Reset()         { *m = PodEvent{} }
+func (m *PodEvent) String() string { return proto.CompactTextString(m) }
+func (*PodEvent) ProtoMessage()    {}
+func (*PodEvent) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{18}
+}
+
+func (m *PodEvent) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_PodEvent.Unmarshal(m, b)
+}
+func (m *PodEvent) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_PodEvent.Marshal(b, m, deterministic)
+}
+func (m *PodEvent) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_PodEvent.Merge(m, src)
+}
+func (m *PodEvent) XXX_Size() int {
+	return xxx_messageInfo_PodEvent.Size(m)
+}
+func (m *PodEvent) XXX_DiscardUnknown() {
+	xxx_messageInfo_PodEvent.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_PodEvent proto.InternalMessageInfo
+
+func (m *PodEvent) GetType() string {
+	if m != nil {
+		return m.Type
+	}
+	return ""
+}
+
+func (m *PodEvent) GetReason() string {
+	if m != nil {
+		return m.Reason
+	}
+	return ""
+}
+
+func (m *PodEvent) GetAge() string {
+	if m != nil {
+		return m.Age
+	}
+	return ""
+}
+
+func (m *PodEvent) GetMessage() string {
+	if m != nil {
+		return m.Message
+	}
+	return ""
+}
+
+type PodStatus struct {
+	Type                 PodStatus_Type `protobuf:"varint,1,opt,name=type,proto3,enum=pb.PodStatus_Type" json:"type,omitempty"`
+	Reason               string         `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message              string         `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	Advice               string         `protobuf:"bytes,4,opt,name=advice,proto3" json:"advice,omitempty"`
+	TypeStr              string         `protobuf:"bytes,5,opt,name=type_str,json=typeStr,proto3" json:"type_str,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}       `json:"-"`
+	XXX_unrecognized     []byte         `json:"-"`
+	XXX_sizecache        int32          `json:"-"`
+}
+
+func (m *PodStatus) Reset()         { *m = PodStatus{} }
+func (m *PodStatus) String() string { return proto.CompactTextString(m) }
+func (*PodStatus) ProtoMessage()    {}
+func (*PodStatus) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{19}
+}
+
+func (m *PodStatus) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_PodStatus.Unmarshal(m, b)
+}
+func (m *PodStatus) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_PodStatus.Marshal(b, m, deterministic)
+}
+func (m *PodStatus) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_PodStatus.Merge(m, src)
+}
+func (m *PodStatus) XXX_Size() int {
+	return xxx_messageInfo_PodStatus.Size(m)
+}
+func (m *PodStatus) XXX_DiscardUnknown() {
+	xxx_messageInfo_PodStatus.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_PodStatus proto.InternalMessageInfo
+
+func (m *PodStatus) GetType() PodStatus_Type {
+	if m != nil {
+		return m.Type
+	}
+	return PodStatus_PENDING
+}
+
+func (m *PodStatus) GetReason() string {
+	if m != nil {
+		return m.Reason
+	}
+	return ""
+}
+
+func (m *PodStatus) GetMessage() string {
+	if m != nil {
+		return m.Message
+	}
+	return ""
+}
+
+func (m *PodStatus) GetAdvice() string {
+	if m != nil {
+		return m.Advice
+	}
+	return ""
+}
+
+func (m *PodStatus) GetTypeStr() string {
+	if m != nil {
+		return m.TypeStr
+	}
+	return ""
+}
+
+type PodContainer struct {
+	Image                string   `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
+	State                string   `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	Reason               string   `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	Started              string   `protobuf:"bytes,4,opt,name=started,proto3" json:"started,omitempty"`
+	LimitMemory          string   `protobuf:"bytes,5,opt,name=limit_memory,json=limitMemory,proto3" json:"limit_memory,omitempty"`
+	LimitCpu             string   `protobuf:"bytes,6,opt,name=limit_cpu,json=limitCpu,proto3" json:"limit_cpu,omitempty"`
+	RequestMemory        string   `protobuf:"bytes,7,opt,name=request_memory,json=requestMemory,proto3" json:"request_memory,omitempty"`
+	RequestCpu           string   `protobuf:"bytes,8,opt,name=request_cpu,json=requestCpu,proto3" json:"request_cpu,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *PodContainer) Reset()         { *m = PodContainer{} }
+func (m *PodContainer) String() string { return proto.CompactTextString(m) }
+func (*PodContainer) ProtoMessage()    {}
+func (*PodContainer) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{20}
+}
+
+func (m *PodContainer) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_PodContainer.Unmarshal(m, b)
+}
+func (m *PodContainer) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_PodContainer.Marshal(b, m, deterministic)
+}
+func (m *PodContainer) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_PodContainer.Merge(m, src)
+}
+func (m *PodContainer) XXX_Size() int {
+	return xxx_messageInfo_PodContainer.Size(m)
+}
+func (m *PodContainer) XXX_DiscardUnknown() {
+	xxx_messageInfo_PodContainer.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_PodContainer proto.InternalMessageInfo
+
+func (m *PodContainer) GetImage() string {
+	if m != nil {
+		return m.Image
+	}
+	return ""
+}
+
+func (m *PodContainer) GetState() string {
+	if m != nil {
+		return m.State
+	}
+	return ""
+}
+
+func (m *PodContainer) GetReason() string {
+	if m != nil {
+		return m.Reason
+	}
+	return ""
+}
+
+func (m *PodContainer) GetStarted() string {
+	if m != nil {
+		return m.Started
+	}
+	return ""
+}
+
+func (m *PodContainer) GetLimitMemory() string {
+	if m != nil {
+		return m.LimitMemory
+	}
+	return ""
+}
+
+func (m *PodContainer) GetLimitCpu() string {
+	if m != nil {
+		return m.LimitCpu
+	}
+	return ""
+}
+
+func (m *PodContainer) GetRequestMemory() string {
+	if m != nil {
+		return m.RequestMemory
+	}
+	return ""
+}
+
+func (m *PodContainer) GetRequestCpu() string {
+	if m != nil {
+		return m.RequestCpu
+	}
+	return ""
+}
+
+type PodDetail struct {
+	Name                 string          `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Node                 string          `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	StartTime            string          `protobuf:"bytes,3,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	Status               *PodStatus      `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Ip                   string          `protobuf:"bytes,5,opt,name=ip,proto3" json:"ip,omitempty"`
+	NodeIp               string          `protobuf:"bytes,6,opt,name=node_ip,json=nodeIp,proto3" json:"node_ip,omitempty"`
+	Version              string          `protobuf:"bytes,7,opt,name=version,proto3" json:"version,omitempty"`
+	InitContainers       []*PodContainer `protobuf:"bytes,8,rep,name=init_containers,json=initContainers,proto3" json:"init_containers,omitempty"`
+	Containers           []*PodContainer `protobuf:"bytes,9,rep,name=containers,proto3" json:"containers,omitempty"`
+	Events               []*PodEvent     `protobuf:"bytes,10,rep,name=events,proto3" json:"events,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}        `json:"-"`
+	XXX_unrecognized     []byte          `json:"-"`
+	XXX_sizecache        int32           `json:"-"`
+}
+
+func (m *PodDetail) Reset()         { *m = PodDetail{} }
+func (m *PodDetail) String() string { return proto.CompactTextString(m) }
+func (*PodDetail) ProtoMessage()    {}
+func (*PodDetail) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{21}
+}
+
+func (m *PodDetail) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_PodDetail.Unmarshal(m, b)
+}
+func (m *PodDetail) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_PodDetail.Marshal(b, m, deterministic)
+}
+func (m *PodDetail) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_PodDetail.Merge(m, src)
+}
+func (m *PodDetail) XXX_Size() int {
+	return xxx_messageInfo_PodDetail.Size(m)
+}
+func (m *PodDetail) XXX_DiscardUnknown() {
+	xxx_messageInfo_PodDetail.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_PodDetail proto.InternalMessageInfo
+
+func (m *PodDetail) GetName() string {
+	if m != nil {
+		return m.Name
+	}
+	return ""
+}
+
+func (m *PodDetail) GetNode() string {
+	if m != nil {
+		return m.Node
+	}
+	return ""
+}
+
+func (m *PodDetail) GetStartTime() string {
+	if m != nil {
+		return m.StartTime
+	}
+	return ""
+}
+
+func (m *PodDetail) GetStatus() *PodStatus {
+	if m != nil {
+		return m.Status
+	}
+	return nil
+}
+
+func (m *PodDetail) GetIp() string {
+	if m != nil {
+		return m.Ip
+	}
+	return ""
+}
+
+func (m *PodDetail) GetNodeIp() string {
+	if m != nil {
+		return m.NodeIp
+	}
+	return ""
+}
+
+func (m *PodDetail) GetVersion() string {
+	if m != nil {
+		return m.Version
+	}
+	return ""
+}
+
+func (m *PodDetail) GetInitContainers() []*PodContainer {
+	if m != nil {
+		return m.InitContainers
+	}
+	return nil
+}
+
+func (m *PodDetail) GetContainers() []*PodContainer {
+	if m != nil {
+		return m.Containers
+	}
+	return nil
+}
+
+func (m *PodDetail) GetEvents() []*PodEvent {
+	if m != nil {
+		return m.Events
+	}
+	return nil
+}
+
+type StorageClasses struct {
+	List                 []*StorageClassDetail `protobuf:"bytes,1,rep,name=list,proto3" json:"list,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}              `json:"-"`
+	XXX_unrecognized     []byte                `json:"-"`
+	XXX_sizecache        int32                 `json:"-"`
+}
+
+func (m *StorageClasses) Reset()         { *m = StorageClasses{} }
+func (m *StorageClasses) String() string { return proto.CompactTextString(m) }
+func (*StorageClasses) ProtoMessage()    {}
+func (*StorageClasses) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{22}
+}
+
+func (m *StorageClasses) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_StorageClasses.Unmarshal(m, b)
+}
+func (m *StorageClasses) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_StorageClasses.Marshal(b, m, deterministic)
+}
+func (m *StorageClasses) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_StorageClasses.Merge(m, src)
+}
+func (m *StorageClasses) XXX_Size() int {
+	return xxx_messageInfo_StorageClasses.Size(m)
+}
+func (m *StorageClasses) XXX_DiscardUnknown() {
+	xxx_messageInfo_StorageClasses.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_StorageClasses proto.InternalMessageInfo
+
+func (m *StorageClasses) GetList() []*StorageClassDetail {
+	if m != nil {
+		return m.List
+	}
+	return nil
+}
+
+type StorageClassDetail struct {
+	Name                 string                  `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Provisioner          string                  `protobuf:"bytes,2,opt,name=provisioner,proto3" json:"provisioner,omitempty"`
+	Parameters           map[string]string       `protobuf:"bytes,3,rep,name=parameters,proto3" json:"parameters,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	ReclaimPolicy        string                  `protobuf:"bytes,4,opt,name=reclaim_policy,json=reclaimPolicy,proto3" json:"reclaim_policy,omitempty"`
+	AllowVolumeExpansion bool                    `protobuf:"varint,5,opt,name=allow_volume_expansion,json=allowVolumeExpansion,proto3" json:"allow_volume_expansion,omitempty"`
+	VolumeBindingMode    string                  `protobuf:"bytes,6,opt,name=volume_binding_mode,json=volumeBindingMode,proto3" json:"volume_binding_mode,omitempty"`
+	AllowedTopologies    []*TopologySelectorTerm `protobuf:"bytes,7,rep,name=allowed_topologies,json=allowedTopologies,proto3" json:"allowed_topologies,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                `json:"-"`
+	XXX_unrecognized     []byte                  `json:"-"`
+	XXX_sizecache        int32                   `json:"-"`
+}
+
+func (m *StorageClassDetail) Reset()         { *m = StorageClassDetail{} }
+func (m *StorageClassDetail) String() string { return proto.CompactTextString(m) }
+func (*StorageClassDetail) ProtoMessage()    {}
+func (*StorageClassDetail) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{23}
+}
+
+func (m *StorageClassDetail) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_StorageClassDetail.Unmarshal(m, b)
+}
+func (m *StorageClassDetail) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_StorageClassDetail.Marshal(b, m, deterministic)
+}
+func (m *StorageClassDetail) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_StorageClassDetail.Merge(m, src)
+}
+func (m *StorageClassDetail) XXX_Size() int {
+	return xxx_messageInfo_StorageClassDetail.Size(m)
+}
+func (m *StorageClassDetail) XXX_DiscardUnknown() {
+	xxx_messageInfo_StorageClassDetail.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_StorageClassDetail proto.InternalMessageInfo
+
+func (m *StorageClassDetail) GetName() string {
+	if m != nil {
+		return m.Name
+	}
+	return ""
+}
+
+func (m *StorageClassDetail) GetProvisioner() string {
+	if m != nil {
+		return m.Provisioner
+	}
+	return ""
+}
+
+func (m *StorageClassDetail) GetParameters() map[string]string {
+	if m != nil {
+		return m.Parameters
+	}
+	return nil
+}
+
+func (m *StorageClassDetail) GetReclaimPolicy() string {
+	if m != nil {
+		return m.ReclaimPolicy
+	}
+	return ""
+}
+
+func (m *StorageClassDetail) GetAllowVolumeExpansion() bool {
+	if m != nil {
+		return m.AllowVolumeExpansion
+	}
+	return false
+}
+
+func (m *StorageClassDetail) GetVolumeBindingMode() string {
+	if m != nil {
+		return m.VolumeBindingMode
+	}
+	return ""
+}
+
+func (m *StorageClassDetail) GetAllowedTopologies() []*TopologySelectorTerm {
+	if m != nil {
+		return m.AllowedTopologies
+	}
+	return nil
+}
+
+type TopologySelectorTerm struct {
+	MatchLabelExpressions []*TopologySelectorLabelRequirement `protobuf:"bytes,1,rep,name=match_label_expressions,json=matchLabelExpressions,proto3" json:"match_label_expressions,omitempty"`
+	XXX_NoUnkeyedLiteral  struct{}                            `json:"-"`
+	XXX_unrecognized      []byte                              `json:"-"`
+	XXX_sizecache         int32                               `json:"-"`
+}
+
+func (m *TopologySelectorTerm) Reset()         { *m = TopologySelectorTerm{} }
+func (m *TopologySelectorTerm) String() string { return proto.CompactTextString(m) }
+func (*TopologySelectorTerm) ProtoMessage()    {}
+func (*TopologySelectorTerm) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{24}
+}
+
+func (m *TopologySelectorTerm) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_TopologySelectorTerm.Unmarshal(m, b)
+}
+func (m *TopologySelectorTerm) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_TopologySelectorTerm.Marshal(b, m, deterministic)
+}
+func (m *TopologySelectorTerm) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TopologySelectorTerm.Merge(m, src)
+}
+func (m *TopologySelectorTerm) XXX_Size() int {
+	return xxx_messageInfo_TopologySelectorTerm.Size(m)
+}
+func (m *TopologySelectorTerm) XXX_DiscardUnknown() {
+	xxx_messageInfo_TopologySelectorTerm.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TopologySelectorTerm proto.InternalMessageInfo
+
+func (m *TopologySelectorTerm) GetMatchLabelExpressions() []*TopologySelectorLabelRequirement {
+	if m != nil {
+		return m.MatchLabelExpressions
+	}
+	return nil
+}
+
+type TopologySelectorLabelRequirement struct {
+	Key                  string   `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Values               []string `protobuf:"bytes,2,rep,name=values,proto3" json:"values,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *TopologySelectorLabelRequirement) Reset()         { *m = TopologySelectorLabelRequirement{} }
+func (m *TopologySelectorLabelRequirement) String() string { return proto.CompactTextString(m) }
+func (*TopologySelectorLabelRequirement) ProtoMessage()    {}
+func (*TopologySelectorLabelRequirement) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{25}
+}
+
+func (m *TopologySelectorLabelRequirement) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_TopologySelectorLabelRequirement.Unmarshal(m, b)
+}
+func (m *TopologySelectorLabelRequirement) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_TopologySelectorLabelRequirement.Marshal(b, m, deterministic)
+}
+func (m *TopologySelectorLabelRequirement) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TopologySelectorLabelRequirement.Merge(m, src)
+}
+func (m *TopologySelectorLabelRequirement) XXX_Size() int {
+	return xxx_messageInfo_TopologySelectorLabelRequirement.Size(m)
+}
+func (m *TopologySelectorLabelRequirement) XXX_DiscardUnknown() {
+	xxx_messageInfo_TopologySelectorLabelRequirement.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TopologySelectorLabelRequirement proto.InternalMessageInfo
+
+func (m *TopologySelectorLabelRequirement) GetKey() string {
+	if m != nil {
+		return m.Key
+	}
+	return ""
+}
+
+func (m *TopologySelectorLabelRequirement) GetValues() []string {
+	if m != nil {
+		return m.Values
+	}
+	return nil
+}
+
+type ServiceVolumeStatusMessage struct {
+	Status               map[string]ServiceVolumeStatus `protobuf:"bytes,1,rep,name=status,proto3" json:"status,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3,enum=pb.ServiceVolumeStatus"`
+	XXX_NoUnkeyedLiteral struct{}                       `json:"-"`
+	XXX_unrecognized     []byte                         `json:"-"`
+	XXX_sizecache        int32                          `json:"-"`
+}
+
+func (m *ServiceVolumeStatusMessage) Reset()         { *m = ServiceVolumeStatusMessage{} }
+func (m *ServiceVolumeStatusMessage) String() string { return proto.CompactTextString(m) }
+func (*ServiceVolumeStatusMessage) ProtoMessage()    {}
+func (*ServiceVolumeStatusMessage) Descriptor() ([]byte, []int) {
+	return fileDescriptor_f94cf1a886c479d6, []int{26}
+}
+
+func (m *ServiceVolumeStatusMessage) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_ServiceVolumeStatusMessage.Unmarshal(m, b)
+}
+func (m *ServiceVolumeStatusMessage) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_ServiceVolumeStatusMessage.Marshal(b, m, deterministic)
+}
+func (m *ServiceVolumeStatusMessage) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ServiceVolumeStatusMessage.Merge(m, src)
+}
+func (m *ServiceVolumeStatusMessage) XXX_Size() int {
+	return xxx_messageInfo_ServiceVolumeStatusMessage.Size(m)
+}
+func (m *ServiceVolumeStatusMessage) XXX_DiscardUnknown() {
+	xxx_messageInfo_ServiceVolumeStatusMessage.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ServiceVolumeStatusMessage proto.InternalMessageInfo
+
+func (m *ServiceVolumeStatusMessage) GetStatus() map[string]ServiceVolumeStatus {
+	if m != nil {
+		return m.Status
+	}
+	return nil
+}
+
 func init() {
+	proto.RegisterEnum("pb.ServiceVolumeStatus", ServiceVolumeStatus_name, ServiceVolumeStatus_value)
+	proto.RegisterEnum("pb.PodStatus_Type", PodStatus_Type_name, PodStatus_Type_value)
 	proto.RegisterType((*Empty)(nil), "pb.Empty")
 	proto.RegisterType((*ServiceRequest)(nil), "pb.ServiceRequest")
 	proto.RegisterType((*ServicesRequest)(nil), "pb.ServicesRequest")
@@ -968,81 +1791,153 @@ func init() {
 	proto.RegisterType((*DelThirdPartyEndpointsReq)(nil), "pb.DelThirdPartyEndpointsReq")
 	proto.RegisterType((*ThirdPartyEndpoint)(nil), "pb.ThirdPartyEndpoint")
 	proto.RegisterType((*ThirdPartyEndpoints)(nil), "pb.ThirdPartyEndpoints")
+	proto.RegisterType((*ListPodsBySIDReq)(nil), "pb.ListPodsBySIDReq")
+	proto.RegisterType((*GetPodDetailReq)(nil), "pb.GetPodDetailReq")
+	proto.RegisterType((*PodEvent)(nil), "pb.PodEvent")
+	proto.RegisterType((*PodStatus)(nil), "pb.PodStatus")
+	proto.RegisterType((*PodContainer)(nil), "pb.PodContainer")
+	proto.RegisterType((*PodDetail)(nil), "pb.PodDetail")
+	proto.RegisterType((*StorageClasses)(nil), "pb.StorageClasses")
+	proto.RegisterType((*StorageClassDetail)(nil), "pb.StorageClassDetail")
+	proto.RegisterMapType((map[string]string)(nil), "pb.StorageClassDetail.ParametersEntry")
+	proto.RegisterType((*TopologySelectorTerm)(nil), "pb.TopologySelectorTerm")
+	proto.RegisterType((*TopologySelectorLabelRequirement)(nil), "pb.TopologySelectorLabelRequirement")
+	proto.RegisterType((*ServiceVolumeStatusMessage)(nil), "pb.ServiceVolumeStatusMessage")
+	proto.RegisterMapType((map[string]ServiceVolumeStatus)(nil), "pb.ServiceVolumeStatusMessage.StatusEntry")
 }
 
 func init() { proto.RegisterFile("app_runtime_server.proto", fileDescriptor_f94cf1a886c479d6) }
 
 var fileDescriptor_f94cf1a886c479d6 = []byte{
-	// 1103 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xc4, 0x57, 0x6d, 0x6f, 0xdb, 0x36,
-	0x10, 0xf6, 0xbb, 0xad, 0x73, 0xec, 0x26, 0xec, 0xd2, 0x2a, 0x6e, 0xbb, 0xb6, 0x1a, 0x3a, 0xe4,
-	0x43, 0xe0, 0x0d, 0x19, 0x82, 0xa5, 0x69, 0xb1, 0xc1, 0x48, 0x82, 0xcc, 0x40, 0xda, 0x05, 0x4a,
-	0xfa, 0xd9, 0x50, 0x24, 0x36, 0xe3, 0x62, 0x51, 0x9c, 0x48, 0x05, 0xd0, 0xc7, 0xed, 0x2f, 0xf4,
-	0x7f, 0x0d, 0xfb, 0x11, 0xfb, 0x21, 0x03, 0x5f, 0x24, 0x4b, 0xb6, 0x8a, 0xce, 0xdb, 0x80, 0x7d,
-	0x93, 0x1f, 0x3e, 0xcf, 0x1d, 0x79, 0xc7, 0xbb, 0xa3, 0xc1, 0xf6, 0x18, 0x9b, 0xc5, 0x09, 0x15,
-	0x24, 0xc4, 0x33, 0x8e, 0xe3, 0x3b, 0x1c, 0x8f, 0x59, 0x1c, 0x89, 0x08, 0x35, 0xd8, 0xb5, 0xd3,
-	0x85, 0xf6, 0x69, 0xc8, 0x44, 0xea, 0x7c, 0x05, 0xc3, 0x4b, 0x1c, 0xdf, 0x11, 0x1f, 0xbb, 0xf8,
-	0x97, 0x04, 0x73, 0x81, 0x9e, 0x00, 0x70, 0x8d, 0xcc, 0x48, 0x60, 0xd7, 0x9f, 0xd5, 0x77, 0x2d,
-	0xd7, 0x32, 0xc8, 0x34, 0x70, 0xf6, 0xe1, 0x9e, 0x11, 0xf0, 0x4c, 0xf1, 0x14, 0xfa, 0x0b, 0x05,
-	0x37, 0x12, 0xc8, 0x25, 0xdc, 0xd9, 0x83, 0xc1, 0x15, 0xa6, 0x1e, 0x15, 0x99, 0xe2, 0x11, 0x58,
-	0x42, 0x01, 0x0b, 0x17, 0x3d, 0x0d, 0x4c, 0x03, 0xe7, 0xd7, 0x3a, 0x0c, 0x2e, 0x85, 0x27, 0x12,
-	0xfe, 0x06, 0x73, 0xee, 0xdd, 0x60, 0x74, 0x00, 0x1d, 0xae, 0x00, 0xbb, 0xfe, 0xac, 0xb9, 0xdb,
-	0xdf, 0x7f, 0x32, 0x66, 0xd7, 0xe3, 0x12, 0xc5, 0xfc, 0x3a, 0xa5, 0x22, 0x4e, 0x5d, 0x43, 0x1e,
-	0xbd, 0x84, 0x7e, 0x01, 0x46, 0x9b, 0xd0, 0xbc, 0xc5, 0xa9, 0x71, 0x27, 0x3f, 0xd1, 0x67, 0xd0,
-	0xbe, 0xf3, 0xe6, 0x09, 0xb6, 0x1b, 0x0a, 0xd3, 0x3f, 0x8e, 0x1a, 0x87, 0x75, 0x27, 0x85, 0xfe,
-	0x09, 0xe1, 0xb7, 0xd9, 0x06, 0xbe, 0x86, 0x76, 0x40, 0xf8, 0x6d, 0xe6, 0x7f, 0x24, 0xfd, 0x17,
-	0xd6, 0xd5, 0xb7, 0x71, 0xae, 0x89, 0xa3, 0x43, 0x80, 0x05, 0xf8, 0x29, 0xd7, 0xf5, 0xa2, 0xeb,
-	0x23, 0xd8, 0x32, 0x01, 0x9e, 0x30, 0x76, 0x11, 0x05, 0xe7, 0x84, 0x0b, 0xf4, 0x02, 0x5a, 0x2c,
-	0x0a, 0x32, 0xff, 0x5b, 0xea, 0xfc, 0x45, 0x92, 0xab, 0x96, 0x9d, 0xdf, 0x1b, 0x30, 0x28, 0xe1,
-	0x9f, 0xc8, 0xa6, 0x4c, 0x44, 0x80, 0xd9, 0x3c, 0x4a, 0xe5, 0xaa, 0x8e, 0x42, 0x4f, 0x03, 0xd3,
-	0x40, 0xe6, 0xd5, 0x2c, 0x8a, 0x94, 0x61, 0xbb, 0xa9, 0xf3, 0xaa, 0xa1, 0xab, 0x94, 0x61, 0xb4,
-	0x03, 0x3d, 0x16, 0x05, 0x33, 0xea, 0x85, 0xd8, 0x6e, 0xa9, 0xd5, 0x2e, 0x8b, 0x82, 0xb7, 0x5e,
-	0x88, 0xd1, 0x36, 0x74, 0xe4, 0x12, 0x61, 0x76, 0x5b, 0xc7, 0x96, 0x45, 0xc1, 0x94, 0xc9, 0xed,
-	0x48, 0xd8, 0x64, 0xb3, 0xa3, 0xb7, 0xc3, 0xa2, 0x40, 0xe7, 0x09, 0x4d, 0x00, 0xfc, 0x88, 0x0a,
-	0x8f, 0x50, 0x1c, 0x73, 0xbb, 0xab, 0x0e, 0xfb, 0x7c, 0xe5, 0xb0, 0xe3, 0xe3, 0x9c, 0xa3, 0x63,
-	0x5e, 0x10, 0x8d, 0xce, 0xe1, 0xde, 0xd2, 0x72, 0x45, 0xf4, 0xbf, 0x28, 0x46, 0xbf, 0xbf, 0x3f,
-	0x90, 0x2e, 0x72, 0x55, 0x31, 0x19, 0xef, 0xc0, 0xca, 0x71, 0xf4, 0x02, 0x86, 0xb9, 0x23, 0x7d,
-	0x68, 0x6d, 0x72, 0x90, 0xa3, 0xea, 0xe8, 0xcf, 0x61, 0x23, 0xc4, 0x61, 0x14, 0xa7, 0xb3, 0x39,
-	0x09, 0x89, 0x50, 0x3e, 0x9a, 0x6e, 0x5f, 0x63, 0xe7, 0x12, 0x72, 0xfe, 0xe8, 0x00, 0x9c, 0xe8,
-	0x30, 0xd3, 0xf7, 0x11, 0x7a, 0x0c, 0x96, 0x34, 0xc7, 0x99, 0xe7, 0x67, 0x36, 0x17, 0x00, 0x72,
-	0x60, 0x43, 0xc6, 0x0b, 0xbf, 0x4f, 0xe6, 0x98, 0x63, 0x61, 0xd2, 0x54, 0xc2, 0xd0, 0xe7, 0x60,
-	0xf2, 0x12, 0x62, 0x2a, 0xca, 0x99, 0x92, 0x08, 0xda, 0x33, 0xf7, 0xa7, 0xa5, 0x42, 0x6a, 0xab,
-	0xfb, 0x9b, 0xfb, 0x1f, 0x5f, 0x44, 0x81, 0x89, 0xa4, 0x62, 0xa1, 0x43, 0xe8, 0x99, 0x2b, 0xc2,
-	0xed, 0xb6, 0x52, 0x3c, 0x5e, 0x52, 0x64, 0x2d, 0x40, 0xab, 0x72, 0x36, 0x7a, 0x05, 0x16, 0xa6,
-	0x01, 0x8b, 0x08, 0x15, 0x32, 0xbd, 0x79, 0xb1, 0x16, 0xa4, 0xa7, 0xd9, 0xba, 0xd6, 0x2e, 0xf8,
-	0xe8, 0x00, 0xba, 0x1c, 0xfb, 0x31, 0x16, 0x59, 0xea, 0x1f, 0xad, 0x78, 0x55, 0xab, 0x5a, 0x98,
-	0x71, 0xa5, 0x4f, 0x42, 0x6f, 0x62, 0xcc, 0x39, 0xe6, 0x76, 0xaf, 0xd2, 0xe7, 0x34, 0x5b, 0x37,
-	0x3e, 0x73, 0x3e, 0x9a, 0x40, 0x3f, 0xc6, 0x6c, 0x4e, 0x7c, 0x4f, 0xc8, 0xd8, 0x5a, 0x4a, 0xfe,
-	0x74, 0x49, 0xee, 0x2e, 0x18, 0xda, 0x40, 0x51, 0x83, 0x1e, 0xe4, 0xdd, 0x09, 0x54, 0xdc, 0xb3,
-	0xf6, 0xf3, 0x2d, 0x58, 0x79, 0x60, 0xd7, 0x69, 0x3e, 0xa3, 0x57, 0x79, 0x11, 0xff, 0x03, 0xf1,
-	0x6b, 0x18, 0x96, 0x23, 0xbc, 0x96, 0xfa, 0x08, 0x36, 0x8a, 0x41, 0x5e, 0xd7, 0x73, 0x39, 0xce,
-	0x6b, 0xa9, 0xbf, 0x83, 0xcd, 0xe5, 0x30, 0xaf, 0xd5, 0xb1, 0xff, 0x6c, 0xc0, 0x30, 0x1b, 0x32,
-	0x3c, 0x4a, 0x62, 0x1f, 0xcb, 0xfe, 0xe5, 0xb3, 0x64, 0x16, 0xeb, 0xa1, 0xa3, 0xcc, 0x34, 0x5d,
-	0xf0, 0x59, 0x52, 0x18, 0x43, 0x92, 0x50, 0x2c, 0xd3, 0x9e, 0xcf, 0x12, 0x55, 0xa3, 0xb2, 0xda,
-	0x4d, 0x19, 0x67, 0x06, 0x9a, 0x8a, 0x31, 0xd0, 0x68, 0x66, 0x63, 0xb9, 0xda, 0x5b, 0x2b, 0xd5,
-	0x8e, 0xbe, 0x84, 0x7b, 0x71, 0x42, 0x29, 0xa1, 0x37, 0x33, 0x39, 0x94, 0x69, 0x12, 0xaa, 0xa6,
-	0xd8, 0x74, 0x07, 0x06, 0x9e, 0x30, 0xf6, 0x36, 0x09, 0x91, 0x03, 0x83, 0x84, 0x72, 0x3f, 0x98,
-	0x99, 0x5d, 0xab, 0xfe, 0xd8, 0x74, 0xfb, 0x0a, 0x3c, 0x56, 0xdb, 0x96, 0xb6, 0x16, 0x1c, 0xed,
-	0xb1, 0xab, 0x6d, 0x65, 0x2c, 0xed, 0x73, 0x17, 0x36, 0x35, 0x6f, 0x71, 0x06, 0xbb, 0xa7, 0x88,
-	0x43, 0x85, 0xbf, 0xc9, 0x0e, 0x81, 0xf6, 0x00, 0x95, 0x98, 0xda, 0xa8, 0xa5, 0xb8, 0x9b, 0x05,
-	0xae, 0xee, 0x5c, 0xbf, 0xd5, 0x61, 0x67, 0x12, 0x04, 0x57, 0x3f, 0x91, 0x38, 0xb8, 0xf0, 0x62,
-	0x91, 0xe6, 0x97, 0x4d, 0xda, 0x42, 0xd0, 0x4a, 0x92, 0x7c, 0xce, 0xa8, 0x6f, 0x99, 0x44, 0x9e,
-	0x0f, 0x17, 0xf9, 0x89, 0x86, 0xd0, 0x20, 0xcc, 0x34, 0xa9, 0x06, 0x61, 0x52, 0xc5, 0xa2, 0x58,
-	0x87, 0xae, 0xed, 0xaa, 0x6f, 0x99, 0x1a, 0xc2, 0x67, 0x11, 0x9d, 0x13, 0x8a, 0x55, 0xb4, 0x7a,
-	0x6e, 0x8f, 0xf0, 0x1f, 0xd5, 0x6f, 0xb5, 0x89, 0x77, 0xec, 0x7f, 0xde, 0xc4, 0x04, 0x76, 0x4e,
-	0xf0, 0xfc, 0xdf, 0xec, 0xc1, 0xf9, 0x50, 0x07, 0xb4, 0x6a, 0xe0, 0x3f, 0x3c, 0xc0, 0xa2, 0x35,
-	0xb5, 0x8b, 0xad, 0xa9, 0x7c, 0xb0, 0xce, 0xd2, 0xc1, 0xbe, 0x87, 0xfb, 0x15, 0xa7, 0x42, 0xbb,
-	0xd0, 0x8c, 0xae, 0x7f, 0x36, 0x2f, 0x90, 0x07, 0xb2, 0x43, 0xae, 0xb2, 0x5c, 0x49, 0xd9, 0xff,
-	0xd0, 0x82, 0xe1, 0x84, 0x31, 0x57, 0x3f, 0x3e, 0x2f, 0x53, 0xea, 0xa3, 0x43, 0xd8, 0x38, 0xc3,
-	0x62, 0xc2, 0x98, 0x19, 0xf4, 0xf7, 0x0b, 0x43, 0x3d, 0x7b, 0x47, 0x8e, 0xb6, 0x56, 0x9e, 0x75,
-	0x4e, 0x0d, 0xbd, 0x04, 0xd0, 0x4a, 0xd9, 0x4b, 0x11, 0x2a, 0xe8, 0x32, 0xd9, 0xf6, 0xca, 0x03,
-	0x41, 0x3e, 0x99, 0x9c, 0x1a, 0x3a, 0x80, 0xc1, 0x19, 0x16, 0x85, 0x39, 0x5b, 0xa5, 0x1e, 0x96,
-	0x7b, 0xbd, 0x53, 0x43, 0xaf, 0x61, 0xeb, 0x0c, 0x8b, 0xa5, 0x5e, 0xa2, 0xf6, 0x56, 0x7a, 0xc4,
-	0x8e, 0x50, 0x11, 0xd2, 0x34, 0xa7, 0x86, 0x7e, 0x80, 0x87, 0xd2, 0x7d, 0x55, 0x04, 0xab, 0xdc,
-	0x3f, 0xac, 0x0e, 0x24, 0x77, 0x6a, 0xe8, 0x18, 0xb6, 0x2b, 0x2b, 0x0d, 0xa9, 0xe9, 0xf6, 0xd1,
-	0x22, 0x1c, 0x59, 0x72, 0x59, 0xbf, 0xee, 0x95, 0x91, 0xca, 0x4a, 0xd1, 0x46, 0x3e, 0x5a, 0x44,
-	0x2b, 0x46, 0x2a, 0xaf, 0x3a, 0x32, 0x73, 0x76, 0xfe, 0x37, 0x8c, 0x5c, 0x77, 0xd4, 0xbf, 0x8f,
-	0x6f, 0xfe, 0x0a, 0x00, 0x00, 0xff, 0xff, 0xab, 0x32, 0x17, 0x45, 0x99, 0x0c, 0x00, 0x00,
+	// 2037 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xc4, 0x58, 0x5d, 0x72, 0x1b, 0xc7,
+	0x11, 0x26, 0x00, 0xe2, 0xaf, 0x41, 0x80, 0xe0, 0x48, 0x14, 0x21, 0xd8, 0xb2, 0xe8, 0x8d, 0xac,
+	0x52, 0x29, 0x0a, 0xed, 0x30, 0x56, 0x59, 0xb2, 0x15, 0xa7, 0x20, 0x02, 0xa6, 0x90, 0x80, 0x20,
+	0x6b, 0x01, 0x26, 0xe5, 0xaa, 0x54, 0xa1, 0x96, 0xd8, 0x31, 0xbd, 0xd1, 0xfe, 0x4c, 0xf6, 0x87,
+	0x0e, 0x1e, 0x93, 0x2b, 0xe4, 0x08, 0x79, 0xc8, 0x05, 0xf2, 0x9c, 0x0b, 0xe4, 0x21, 0xb9, 0x89,
+	0x5e, 0x72, 0x80, 0x54, 0xf7, 0xcc, 0xfe, 0x00, 0x58, 0x86, 0x61, 0x2a, 0x29, 0xbf, 0xed, 0x74,
+	0x7f, 0xfd, 0x33, 0xdd, 0xbd, 0x3d, 0x3d, 0x03, 0x1d, 0x43, 0x88, 0x99, 0x1f, 0xb9, 0xa1, 0xe5,
+	0xf0, 0x59, 0xc0, 0xfd, 0x2b, 0xee, 0x1f, 0x08, 0xdf, 0x0b, 0x3d, 0x56, 0x14, 0x17, 0x5a, 0x15,
+	0xca, 0x03, 0x47, 0x84, 0x0b, 0xed, 0x63, 0x68, 0x4d, 0xb8, 0x7f, 0x65, 0xcd, 0xb9, 0xce, 0x7f,
+	0x1b, 0xf1, 0x20, 0x64, 0x0f, 0x00, 0x02, 0x49, 0x99, 0x59, 0x66, 0xa7, 0xb0, 0x5f, 0x78, 0x52,
+	0xd7, 0xeb, 0x8a, 0x32, 0x34, 0xb5, 0x43, 0xd8, 0x56, 0x02, 0x41, 0x2c, 0xf1, 0x10, 0x1a, 0xa9,
+	0x44, 0xa0, 0x44, 0x20, 0x11, 0x09, 0xb4, 0x67, 0xd0, 0x9c, 0x72, 0xd7, 0x70, 0xc3, 0x58, 0xe2,
+	0x3d, 0xa8, 0x87, 0x44, 0x48, 0x4d, 0xd4, 0x24, 0x61, 0x68, 0x6a, 0xbf, 0x2f, 0x40, 0x73, 0x12,
+	0x1a, 0x61, 0x14, 0x9c, 0xf0, 0x20, 0x30, 0x2e, 0x39, 0x7b, 0x0e, 0x95, 0x80, 0x08, 0x9d, 0xc2,
+	0x7e, 0xe9, 0x49, 0xe3, 0xf0, 0xc1, 0x81, 0xb8, 0x38, 0x58, 0x82, 0xa8, 0xd5, 0xc0, 0x0d, 0xfd,
+	0x85, 0xae, 0xc0, 0xdd, 0x97, 0xd0, 0xc8, 0x90, 0x59, 0x1b, 0x4a, 0x6f, 0xf9, 0x42, 0x99, 0xc3,
+	0x4f, 0x76, 0x17, 0xca, 0x57, 0x86, 0x1d, 0xf1, 0x4e, 0x91, 0x68, 0x72, 0xf1, 0x79, 0xf1, 0x45,
+	0x41, 0x5b, 0x40, 0xa3, 0x6f, 0x05, 0x6f, 0x63, 0x07, 0x3e, 0x81, 0xb2, 0x69, 0x05, 0x6f, 0x63,
+	0xfb, 0x5d, 0xb4, 0x9f, 0xe1, 0xd3, 0xb7, 0x32, 0x2e, 0x81, 0xdd, 0x17, 0x00, 0x29, 0xf1, 0x26,
+	0xd3, 0x85, 0xac, 0x69, 0x07, 0x76, 0x54, 0x80, 0x7b, 0x42, 0x9c, 0x79, 0xe6, 0xc8, 0x0a, 0x42,
+	0xf6, 0x43, 0xa8, 0x7a, 0xb6, 0x79, 0xe6, 0x99, 0xb1, 0x0b, 0x3b, 0x14, 0x82, 0x2c, 0x4e, 0x8f,
+	0x11, 0x08, 0x76, 0xf9, 0x77, 0x04, 0x2e, 0x5e, 0x0b, 0x56, 0x08, 0xed, 0x5d, 0x11, 0x9a, 0x4b,
+	0xac, 0x1b, 0x0a, 0x00, 0x73, 0x67, 0x72, 0x61, 0x7b, 0x0b, 0xe4, 0xca, 0xc0, 0xd5, 0x24, 0x61,
+	0x68, 0x62, 0x29, 0x28, 0x66, 0xb8, 0x10, 0xbc, 0x53, 0x92, 0xa5, 0x20, 0x49, 0xd3, 0x85, 0xe0,
+	0xec, 0x3e, 0xd4, 0x84, 0x67, 0xce, 0x5c, 0xc3, 0xe1, 0x9d, 0x4d, 0xe2, 0x56, 0x85, 0x67, 0x8e,
+	0x0d, 0x87, 0xb3, 0x5d, 0xa8, 0x20, 0xcb, 0x12, 0x9d, 0xb2, 0x4c, 0x87, 0xf0, 0xcc, 0xa1, 0x40,
+	0x77, 0x90, 0xac, 0x0a, 0xa0, 0x22, 0xdd, 0x11, 0x9e, 0x29, 0x53, 0xcb, 0x7a, 0x00, 0x73, 0xcf,
+	0x0d, 0x0d, 0xcb, 0xe5, 0x7e, 0xd0, 0xa9, 0xd2, 0x7e, 0x3f, 0x5c, 0xdb, 0xef, 0xc1, 0x51, 0x82,
+	0x91, 0x69, 0xca, 0x08, 0xa1, 0xd3, 0x68, 0xe1, 0xca, 0xb3, 0x23, 0x87, 0x07, 0x9d, 0xda, 0x7e,
+	0x09, 0x9d, 0x16, 0x9e, 0xf9, 0x4b, 0x49, 0xe9, 0x8e, 0x60, 0x7b, 0x45, 0x3e, 0x27, 0xa3, 0x3f,
+	0xc8, 0x66, 0xb4, 0x71, 0xd8, 0x44, 0x1f, 0x12, 0xa9, 0x6c, 0x82, 0xcf, 0xa1, 0x9e, 0xd0, 0xd9,
+	0x47, 0xd0, 0x4a, 0x3c, 0x91, 0x51, 0x91, 0x2a, 0x9b, 0x09, 0x95, 0x62, 0xf3, 0x21, 0x6c, 0x39,
+	0xdc, 0xf1, 0xfc, 0xc5, 0xcc, 0xb6, 0x1c, 0x2b, 0x24, 0x1b, 0x25, 0xbd, 0x21, 0x69, 0x23, 0x24,
+	0x69, 0xef, 0x2a, 0x00, 0x7d, 0x99, 0x07, 0xf7, 0x1b, 0x8f, 0xbd, 0x0f, 0x75, 0x54, 0x17, 0x08,
+	0x63, 0x1e, 0xeb, 0x4c, 0x09, 0x4c, 0x83, 0x2d, 0x0c, 0x28, 0xff, 0x26, 0xb2, 0x79, 0xc0, 0x43,
+	0x95, 0xc7, 0x25, 0x1a, 0xfb, 0x00, 0x54, 0xe2, 0x1c, 0xee, 0x86, 0xcb, 0xa9, 0x44, 0x0a, 0xd5,
+	0x49, 0x68, 0xf8, 0xe1, 0x0c, 0x5b, 0x8c, 0x4a, 0x66, 0x9d, 0x28, 0x53, 0xcb, 0xe1, 0xec, 0x19,
+	0x6c, 0x0a, 0x2c, 0xc1, 0x32, 0xa5, 0xa4, 0x43, 0xbf, 0x4c, 0xe2, 0xde, 0x01, 0xd6, 0x9e, 0xcc,
+	0x04, 0xa1, 0xd8, 0x0b, 0xa8, 0xa9, 0x12, 0xc3, 0x1c, 0xa3, 0xc4, 0xfb, 0x2b, 0x12, 0x71, 0xd7,
+	0x91, 0x52, 0x09, 0x9a, 0x7d, 0x01, 0x75, 0xee, 0x9a, 0xc2, 0xb3, 0xdc, 0x30, 0xce, 0xff, 0x83,
+	0x15, 0xd1, 0x41, 0xcc, 0x97, 0xb2, 0x29, 0x9e, 0x3d, 0x87, 0x6a, 0xc0, 0xe7, 0x3e, 0x0f, 0x65,
+	0xda, 0x1b, 0x87, 0xef, 0xad, 0x59, 0x25, 0xae, 0x14, 0x8c, 0xb1, 0x68, 0xd3, 0x72, 0x2f, 0x7d,
+	0x1e, 0x04, 0x3c, 0xe8, 0xd4, 0x73, 0x6d, 0x0e, 0x63, 0xbe, 0xb2, 0x99, 0xe0, 0x59, 0x0f, 0x1a,
+	0x3e, 0x17, 0xb6, 0x35, 0x37, 0x42, 0x0c, 0x3d, 0x90, 0xf8, 0xc3, 0x15, 0x71, 0x3d, 0x45, 0x48,
+	0x05, 0x59, 0x19, 0x76, 0x2f, 0x69, 0x88, 0x0d, 0x0a, 0x7b, 0xdc, 0xf1, 0x3e, 0x83, 0x7a, 0x12,
+	0xd8, 0xdb, 0xf4, 0xbb, 0xee, 0x17, 0x49, 0x13, 0xf8, 0x2f, 0x84, 0x5f, 0x41, 0x6b, 0x39, 0xc2,
+	0xb7, 0x92, 0xfe, 0x1c, 0xb6, 0xb2, 0x41, 0xbe, 0xad, 0xe5, 0xe5, 0x38, 0xdf, 0x4a, 0xfa, 0x4b,
+	0x68, 0xaf, 0x86, 0xf9, 0x56, 0x87, 0xc4, 0x3f, 0x4a, 0xd0, 0x8a, 0xcf, 0xb5, 0xc0, 0x8b, 0xfc,
+	0x39, 0xc7, 0x56, 0x32, 0x17, 0xd1, 0xcc, 0x97, 0xe7, 0x1c, 0xa9, 0x29, 0xe9, 0x30, 0x17, 0x51,
+	0xe6, 0xe4, 0x43, 0x40, 0xf6, 0x2f, 0xae, 0xcd, 0x45, 0x44, 0xbf, 0x30, 0x36, 0x03, 0xf5, 0x97,
+	0xc7, 0x0a, 0x4a, 0x84, 0x68, 0x4a, 0x6a, 0xac, 0x63, 0xb5, 0x19, 0x6c, 0xae, 0x35, 0x03, 0xf6,
+	0x18, 0xb6, 0xfd, 0xc8, 0x75, 0x2d, 0xf7, 0x72, 0x86, 0x73, 0x80, 0x1b, 0x39, 0xd4, 0x54, 0x4b,
+	0x7a, 0x53, 0x91, 0x7b, 0x42, 0x8c, 0x23, 0x87, 0x69, 0xd0, 0x8c, 0xdc, 0x60, 0x6e, 0xce, 0x94,
+	0xd7, 0xd4, 0x5f, 0x4b, 0x7a, 0x83, 0x88, 0x47, 0xe4, 0x36, 0xea, 0x4a, 0x31, 0xd2, 0x62, 0x55,
+	0xea, 0x8a, 0x51, 0xd2, 0xe6, 0x13, 0x68, 0x4b, 0x5c, 0xba, 0x87, 0x4e, 0x8d, 0x80, 0x2d, 0xa2,
+	0x9f, 0xc4, 0x9b, 0x60, 0xcf, 0x80, 0x2d, 0x21, 0xa5, 0xd2, 0x3a, 0x61, 0xdb, 0x19, 0xac, 0xd4,
+	0xfb, 0x63, 0xd8, 0xcd, 0xee, 0x25, 0xfc, 0xd6, 0xf2, 0x4d, 0xda, 0x11, 0x90, 0x00, 0x4b, 0x77,
+	0x34, 0x45, 0x16, 0x6e, 0xeb, 0x33, 0xe8, 0x64, 0x45, 0x2c, 0x37, 0xe4, 0xbe, 0x6b, 0xd8, 0x24,
+	0xd5, 0x20, 0xa9, 0xdd, 0x54, 0x6a, 0xa8, 0xb8, 0xe3, 0xc8, 0xd1, 0xfe, 0x50, 0x80, 0xfb, 0x3d,
+	0xd3, 0x24, 0x45, 0x67, 0x86, 0x1f, 0x2e, 0x92, 0xc2, 0x46, 0xbf, 0x19, 0x6c, 0x46, 0x51, 0x72,
+	0x26, 0xd2, 0x37, 0x16, 0x4c, 0x90, 0x1c, 0x84, 0xf8, 0xc9, 0x5a, 0x50, 0xb4, 0x84, 0xea, 0x97,
+	0x45, 0x4b, 0xa0, 0x94, 0xf0, 0x7c, 0x99, 0xa6, 0xb2, 0x4e, 0xdf, 0x58, 0x06, 0x56, 0x30, 0xf3,
+	0x5c, 0xdb, 0x72, 0x39, 0x65, 0xa6, 0xa6, 0xd7, 0xac, 0xe0, 0x94, 0xd6, 0xe4, 0xc4, 0xb9, 0xf8,
+	0x9e, 0x9d, 0xe0, 0x70, 0xbf, 0xcf, 0xed, 0xff, 0xb7, 0x0f, 0xda, 0x1f, 0x0b, 0xc0, 0xd6, 0x8d,
+	0xfc, 0x0f, 0x37, 0x99, 0xb6, 0xca, 0x72, 0xb6, 0x55, 0x2e, 0x6f, 0xbe, 0xb2, 0xb2, 0xf9, 0x9f,
+	0xc1, 0x9d, 0x9c, 0x9d, 0xb3, 0x27, 0x50, 0xf2, 0x2e, 0x7e, 0xa3, 0x26, 0xb0, 0x7b, 0xd8, 0xb1,
+	0xd7, 0x51, 0x3a, 0x42, 0xb4, 0x47, 0xd0, 0xc6, 0xb9, 0x0d, 0x9b, 0xf1, 0xeb, 0xc5, 0x64, 0xd8,
+	0xc7, 0xa0, 0x29, 0xff, 0x0b, 0x89, 0xff, 0xda, 0x97, 0xb0, 0x7d, 0xcc, 0x11, 0xd4, 0xe7, 0xa1,
+	0x61, 0xd9, 0xb9, 0xa0, 0xa5, 0x89, 0xa9, 0xb8, 0x34, 0x31, 0x69, 0x17, 0x50, 0x3b, 0xf3, 0xcc,
+	0xc1, 0x15, 0x97, 0x11, 0xa3, 0x91, 0x4b, 0x45, 0x0c, 0xbf, 0x71, 0xef, 0x3e, 0x37, 0x02, 0xcf,
+	0x55, 0x82, 0x6a, 0x85, 0x46, 0x8c, 0xcb, 0x78, 0x3a, 0xc3, 0x4f, 0xd6, 0x81, 0xaa, 0x23, 0x67,
+	0x59, 0x15, 0xa6, 0x78, 0xa9, 0xfd, 0xb5, 0x48, 0x67, 0x8a, 0x9a, 0xb6, 0x1e, 0x67, 0xac, 0xb4,
+	0x0e, 0x19, 0x86, 0x20, 0x61, 0x1e, 0xe0, 0x80, 0x77, 0x83, 0xe5, 0x8c, 0x9d, 0xd2, 0x92, 0x1d,
+	0x94, 0x30, 0x4c, 0x3c, 0x80, 0xd4, 0x24, 0xa1, 0x56, 0xb8, 0x7d, 0xd4, 0x38, 0x0b, 0x42, 0x3f,
+	0x76, 0x0d, 0xd7, 0x93, 0xd0, 0xd7, 0xfe, 0x54, 0x80, 0x4d, 0x1a, 0x2a, 0x1b, 0x50, 0x3d, 0x1b,
+	0x8c, 0xfb, 0xc3, 0xf1, 0x71, 0x7b, 0x03, 0x17, 0xfa, 0xf9, 0x78, 0x8c, 0x8b, 0x02, 0x6b, 0x42,
+	0x7d, 0x72, 0x7e, 0x74, 0x34, 0x18, 0xf4, 0x07, 0xfd, 0x76, 0x91, 0x01, 0x54, 0xbe, 0xea, 0x0d,
+	0x47, 0x83, 0x7e, 0xbb, 0x84, 0xb8, 0xf3, 0xf1, 0x2f, 0xc6, 0xa7, 0xbf, 0x1a, 0xb7, 0x37, 0x59,
+	0x0b, 0x60, 0x3a, 0x38, 0x19, 0x8e, 0x7b, 0x53, 0x94, 0x2b, 0xb3, 0x2d, 0xa8, 0xf5, 0x5e, 0x8f,
+	0x4f, 0xf5, 0x93, 0xde, 0xa8, 0x5d, 0x41, 0xee, 0x70, 0x3c, 0x9c, 0x0e, 0x25, 0xb7, 0x8a, 0xeb,
+	0xc9, 0xd1, 0x9b, 0x41, 0xff, 0x7c, 0x84, 0xeb, 0x1a, 0xa2, 0xc7, 0xa7, 0x53, 0x7d, 0xd0, 0xeb,
+	0x7f, 0xdd, 0xae, 0xa3, 0xcd, 0xf3, 0xf1, 0x9b, 0x41, 0x6f, 0x34, 0x7d, 0xf3, 0x75, 0x1b, 0xb4,
+	0x7f, 0x16, 0x60, 0xeb, 0xcc, 0x33, 0xd3, 0x91, 0xef, 0x2e, 0x94, 0x2d, 0x07, 0x23, 0x20, 0x53,
+	0x25, 0x17, 0x48, 0xa5, 0xe9, 0x2b, 0x3e, 0x66, 0x68, 0x91, 0x89, 0x63, 0x69, 0x35, 0x8e, 0x34,
+	0x69, 0x71, 0x33, 0x9e, 0xa2, 0xd5, 0x12, 0x0f, 0x07, 0x6a, 0xa7, 0xaa, 0xb7, 0xaa, 0x98, 0x35,
+	0x88, 0x26, 0xbb, 0x2a, 0x96, 0xbe, 0x84, 0xcc, 0x45, 0xa4, 0x06, 0xea, 0x1a, 0x11, 0x8e, 0x44,
+	0x84, 0x67, 0x90, 0x3a, 0x7c, 0x62, 0x0d, 0x55, 0x39, 0x90, 0x2a, 0xaa, 0xd2, 0xf1, 0x10, 0x87,
+	0x18, 0x09, 0x43, 0x2d, 0x35, 0x39, 0x1d, 0x2a, 0xd2, 0x91, 0x88, 0xb4, 0xbf, 0xcb, 0xba, 0x91,
+	0x95, 0x8d, 0xd5, 0x99, 0x19, 0x6e, 0xe9, 0x9b, 0x68, 0x9e, 0x19, 0x6f, 0x98, 0xbe, 0x57, 0x66,
+	0xca, 0xd2, 0xea, 0x4c, 0xf9, 0x51, 0xf2, 0x33, 0x6f, 0xa6, 0x43, 0x76, 0x52, 0x80, 0xc9, 0xbf,
+	0x2d, 0xfb, 0x42, 0x39, 0xe9, 0x0b, 0x7b, 0x50, 0x45, 0xed, 0x78, 0xb5, 0x90, 0xdb, 0xad, 0xe0,
+	0x72, 0x28, 0x30, 0x8c, 0x57, 0xdc, 0x0f, 0x2c, 0xcf, 0x55, 0xbb, 0x8c, 0x97, 0xec, 0x25, 0x6c,
+	0x5b, 0x2e, 0x86, 0x28, 0xbd, 0x5b, 0xc8, 0x01, 0xb1, 0xad, 0x4c, 0xa6, 0xa3, 0x7d, 0x0b, 0x81,
+	0xe9, 0xfd, 0x80, 0x7d, 0xb2, 0x74, 0x23, 0xa9, 0x5f, 0x23, 0x95, 0xbd, 0x80, 0x3c, 0x82, 0x0a,
+	0xc7, 0x9f, 0x38, 0x50, 0xc3, 0xe0, 0x96, 0x42, 0xd3, 0x9f, 0xad, 0x2b, 0x9e, 0xf6, 0x0a, 0x5a,
+	0x93, 0xd0, 0xf3, 0x8d, 0x4b, 0x7e, 0x64, 0x1b, 0x34, 0x49, 0x3e, 0x85, 0x4d, 0xdb, 0xa2, 0x31,
+	0x23, 0x69, 0x48, 0x59, 0x84, 0xea, 0x2a, 0x84, 0xd1, 0xfe, 0x5c, 0x02, 0xb6, 0xce, 0xcc, 0x4d,
+	0xcc, 0x3e, 0x34, 0x84, 0xef, 0x5d, 0x59, 0x18, 0x08, 0xee, 0xab, 0xfc, 0x64, 0x49, 0xec, 0x2b,
+	0x00, 0x61, 0xf8, 0x86, 0xc3, 0x43, 0xdc, 0x62, 0x89, 0xcc, 0x3f, 0xce, 0x37, 0x7f, 0x70, 0x96,
+	0x00, 0xd5, 0xcd, 0x2b, 0x95, 0x94, 0xc5, 0x36, 0xb7, 0x0d, 0xcb, 0x99, 0x09, 0xcf, 0xb6, 0xe6,
+	0x0b, 0x55, 0xcd, 0x4d, 0x45, 0x3d, 0x23, 0x22, 0xfb, 0x14, 0xee, 0x19, 0xb6, 0xed, 0x7d, 0xa7,
+	0xae, 0x68, 0x33, 0xfe, 0x3b, 0x61, 0xb8, 0x94, 0x35, 0x79, 0x6a, 0xdd, 0x25, 0xae, 0xbc, 0xad,
+	0x0d, 0x62, 0x1e, 0x3b, 0x80, 0x3b, 0x0a, 0x7f, 0x61, 0xb9, 0x26, 0xce, 0x02, 0x0e, 0x96, 0x9b,
+	0xac, 0x80, 0x1d, 0xc9, 0x7a, 0x2d, 0x39, 0x27, 0x58, 0x7b, 0xc7, 0xc0, 0x48, 0x0f, 0x37, 0x67,
+	0xa1, 0x27, 0x3c, 0xdb, 0xbb, 0xb4, 0x78, 0x7c, 0xa3, 0xa0, 0xeb, 0xcb, 0x54, 0x52, 0x17, 0x13,
+	0x6e, 0xf3, 0x79, 0xe8, 0xf9, 0x53, 0xee, 0x3b, 0xfa, 0x8e, 0x92, 0x99, 0x26, 0x22, 0xdd, 0x9f,
+	0xc2, 0xf6, 0xca, 0xa6, 0x6f, 0x35, 0x56, 0x86, 0x70, 0x37, 0xcf, 0x12, 0xfb, 0x35, 0xec, 0x39,
+	0x46, 0x38, 0xff, 0x76, 0x66, 0x1b, 0x17, 0xdc, 0xc6, 0x20, 0xe0, 0xe0, 0x6b, 0x79, 0x6e, 0xfc,
+	0x26, 0xf0, 0x28, 0xcf, 0xc9, 0x11, 0x82, 0x71, 0x72, 0xb4, 0x7c, 0x8e, 0xd7, 0x36, 0x7d, 0x97,
+	0x94, 0x10, 0x79, 0x90, 0xaa, 0xd0, 0x46, 0xb0, 0x7f, 0x93, 0x68, 0xce, 0x2e, 0xee, 0x41, 0x85,
+	0x1c, 0x97, 0x2f, 0x0d, 0x75, 0x5d, 0xad, 0xb4, 0xbf, 0x14, 0xa0, 0xab, 0x2e, 0x14, 0x32, 0x2d,
+	0xcb, 0x0f, 0x3a, 0xaf, 0x57, 0x1e, 0x74, 0x9e, 0x66, 0x2e, 0xec, 0x39, 0xf8, 0xdc, 0xd7, 0x1d,
+	0xfd, 0xa6, 0xd7, 0x9d, 0x1f, 0x65, 0x23, 0xdc, 0x3a, 0xdc, 0xbb, 0xc6, 0x46, 0x26, 0xf4, 0x4f,
+	0x3f, 0x86, 0x3b, 0x39, 0x08, 0x56, 0x87, 0xb2, 0x6c, 0xee, 0x1b, 0xd8, 0xdc, 0xc7, 0xa7, 0xd3,
+	0x99, 0x5c, 0x16, 0x0e, 0xff, 0x56, 0x86, 0x56, 0x4f, 0x08, 0x5d, 0xbe, 0xb3, 0x4d, 0x16, 0xee,
+	0x9c, 0xbd, 0x80, 0xad, 0x63, 0x1e, 0xf6, 0x84, 0x50, 0xc2, 0x77, 0x32, 0x76, 0xe3, 0x27, 0xb3,
+	0xee, 0xce, 0xda, 0x0b, 0x96, 0xb6, 0xc1, 0x5e, 0x02, 0x48, 0x49, 0x7a, 0xc5, 0x61, 0x19, 0xb9,
+	0x58, 0x6c, 0x77, 0xed, 0x61, 0x03, 0xa7, 0x0c, 0x6d, 0x83, 0x3d, 0x87, 0xe6, 0x31, 0x0f, 0x33,
+	0xd7, 0xff, 0x3c, 0xe9, 0xd6, 0xf2, 0x1d, 0x53, 0xdb, 0x60, 0xaf, 0x60, 0xe7, 0x98, 0x87, 0x2b,
+	0x77, 0x18, 0xf2, 0x6d, 0xe9, 0xbd, 0xae, 0xcb, 0xb2, 0x24, 0x09, 0xd3, 0x36, 0xd8, 0x1b, 0xd8,
+	0x43, 0xf3, 0x79, 0x93, 0x52, 0x9e, 0xf9, 0xbd, 0xfc, 0x81, 0x29, 0xd0, 0x36, 0xd8, 0x11, 0xec,
+	0xe6, 0x4e, 0xdd, 0x8c, 0x6e, 0xd5, 0xd7, 0x0e, 0xe4, 0xdd, 0x3a, 0xb2, 0xe5, 0x43, 0x26, 0x29,
+	0xc9, 0x9d, 0x9a, 0xa5, 0x92, 0x6b, 0x07, 0xea, 0x35, 0x25, 0xb9, 0x63, 0x2f, 0x53, 0xf7, 0x7b,
+	0xfb, 0x3f, 0x51, 0xf2, 0x29, 0x95, 0x40, 0x7a, 0xfa, 0x51, 0x09, 0xac, 0x4c, 0x7a, 0xdd, 0xf8,
+	0xec, 0x92, 0x14, 0x92, 0xc2, 0x64, 0xac, 0xb4, 0xf8, 0x54, 0xaf, 0x4c, 0xc2, 0x32, 0x5b, 0xdb,
+	0x60, 0x3f, 0x07, 0x26, 0x8b, 0x66, 0xa9, 0x62, 0xf3, 0xe2, 0xff, 0xc1, 0xbf, 0xff, 0xc9, 0xb4,
+	0x8d, 0x8b, 0x0a, 0x3d, 0x10, 0xff, 0xe4, 0x5f, 0x01, 0x00, 0x00, 0xff, 0xff, 0x27, 0xef, 0xee,
+	0x1b, 0x3c, 0x16, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -1065,6 +1960,9 @@ type AppRuntimeSyncClient interface {
 	AddThirdPartyEndpoint(ctx context.Context, in *AddThirdPartyEndpointsReq, opts ...grpc.CallOption) (*Empty, error)
 	UpdThirdPartyEndpoint(ctx context.Context, in *UpdThirdPartyEndpointsReq, opts ...grpc.CallOption) (*Empty, error)
 	DelThirdPartyEndpoint(ctx context.Context, in *DelThirdPartyEndpointsReq, opts ...grpc.CallOption) (*Empty, error)
+	GetPodDetail(ctx context.Context, in *GetPodDetailReq, opts ...grpc.CallOption) (*PodDetail, error)
+	GetStorageClasses(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StorageClasses, error)
+	GetAppVolumeStatus(ctx context.Context, in *ServiceRequest, opts ...grpc.CallOption) (*ServiceVolumeStatusMessage, error)
 }
 
 type appRuntimeSyncClient struct {
@@ -1147,6 +2045,33 @@ func (c *appRuntimeSyncClient) DelThirdPartyEndpoint(ctx context.Context, in *De
 	return out, nil
 }
 
+func (c *appRuntimeSyncClient) GetPodDetail(ctx context.Context, in *GetPodDetailReq, opts ...grpc.CallOption) (*PodDetail, error) {
+	out := new(PodDetail)
+	err := c.cc.Invoke(ctx, "/pb.AppRuntimeSync/GetPodDetail", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *appRuntimeSyncClient) GetStorageClasses(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StorageClasses, error) {
+	out := new(StorageClasses)
+	err := c.cc.Invoke(ctx, "/pb.AppRuntimeSync/GetStorageClasses", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *appRuntimeSyncClient) GetAppVolumeStatus(ctx context.Context, in *ServiceRequest, opts ...grpc.CallOption) (*ServiceVolumeStatusMessage, error) {
+	out := new(ServiceVolumeStatusMessage)
+	err := c.cc.Invoke(ctx, "/pb.AppRuntimeSync/GetAppVolumeStatus", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AppRuntimeSyncServer is the server API for AppRuntimeSync service.
 type AppRuntimeSyncServer interface {
 	GetAppStatus(context.Context, *ServicesRequest) (*StatusMessage, error)
@@ -1157,6 +2082,9 @@ type AppRuntimeSyncServer interface {
 	AddThirdPartyEndpoint(context.Context, *AddThirdPartyEndpointsReq) (*Empty, error)
 	UpdThirdPartyEndpoint(context.Context, *UpdThirdPartyEndpointsReq) (*Empty, error)
 	DelThirdPartyEndpoint(context.Context, *DelThirdPartyEndpointsReq) (*Empty, error)
+	GetPodDetail(context.Context, *GetPodDetailReq) (*PodDetail, error)
+	GetStorageClasses(context.Context, *Empty) (*StorageClasses, error)
+	GetAppVolumeStatus(context.Context, *ServiceRequest) (*ServiceVolumeStatusMessage, error)
 }
 
 func RegisterAppRuntimeSyncServer(s *grpc.Server, srv AppRuntimeSyncServer) {
@@ -1307,6 +2235,60 @@ func _AppRuntimeSync_DelThirdPartyEndpoint_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AppRuntimeSync_GetPodDetail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPodDetailReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AppRuntimeSyncServer).GetPodDetail(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/pb.AppRuntimeSync/GetPodDetail",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AppRuntimeSyncServer).GetPodDetail(ctx, req.(*GetPodDetailReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AppRuntimeSync_GetStorageClasses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AppRuntimeSyncServer).GetStorageClasses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/pb.AppRuntimeSync/GetStorageClasses",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AppRuntimeSyncServer).GetStorageClasses(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AppRuntimeSync_GetAppVolumeStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AppRuntimeSyncServer).GetAppVolumeStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/pb.AppRuntimeSync/GetAppVolumeStatus",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AppRuntimeSyncServer).GetAppVolumeStatus(ctx, req.(*ServiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _AppRuntimeSync_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "pb.AppRuntimeSync",
 	HandlerType: (*AppRuntimeSyncServer)(nil),
@@ -1342,6 +2324,18 @@ var _AppRuntimeSync_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DelThirdPartyEndpoint",
 			Handler:    _AppRuntimeSync_DelThirdPartyEndpoint_Handler,
+		},
+		{
+			MethodName: "GetPodDetail",
+			Handler:    _AppRuntimeSync_GetPodDetail_Handler,
+		},
+		{
+			MethodName: "GetStorageClasses",
+			Handler:    _AppRuntimeSync_GetStorageClasses_Handler,
+		},
+		{
+			MethodName: "GetAppVolumeStatus",
+			Handler:    _AppRuntimeSync_GetAppVolumeStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

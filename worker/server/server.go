@@ -29,15 +29,21 @@ import (
 	"github.com/eapache/channels"
 	"github.com/goodrain/rainbond/cmd/worker/option"
 	"github.com/goodrain/rainbond/db/model"
-	"github.com/goodrain/rainbond/discover.v2"
+	discover "github.com/goodrain/rainbond/discover.v2"
 	"github.com/goodrain/rainbond/util"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
+	"github.com/goodrain/rainbond/util/k8s"
 	"github.com/goodrain/rainbond/worker/appm/store"
 	"github.com/goodrain/rainbond/worker/appm/thirdparty/discovery"
-	"github.com/goodrain/rainbond/worker/appm/types/v1"
+	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
 	"github.com/goodrain/rainbond/worker/server/pb"
+	wutil "github.com/goodrain/rainbond/worker/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/duration"
+	"k8s.io/client-go/kubernetes"
 )
 
 //RuntimeServer app runtime grpc server
@@ -49,23 +55,25 @@ type RuntimeServer struct {
 	server    *grpc.Server
 	hostIP    string
 	keepalive *discover.KeepAlive
-
-	updateCh *channels.RingChannel
+	clientset kubernetes.Interface
+	updateCh  *channels.RingChannel
 }
 
 //CreaterRuntimeServer create a runtime grpc server
 func CreaterRuntimeServer(conf option.Config,
 	store store.Storer,
+	clientset kubernetes.Interface,
 	updateCh *channels.RingChannel) *RuntimeServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	rs := &RuntimeServer{
-		conf:     conf,
-		ctx:      ctx,
-		cancel:   cancel,
-		server:   grpc.NewServer(),
-		hostIP:   conf.HostIP,
-		store:    store,
-		updateCh: updateCh,
+		conf:      conf,
+		ctx:       ctx,
+		cancel:    cancel,
+		server:    grpc.NewServer(),
+		hostIP:    conf.HostIP,
+		store:     store,
+		clientset: clientset,
+		updateCh:  updateCh,
 	}
 	pb.RegisterAppRuntimeSyncServer(rs.server, rs)
 	// Register reflection service on gRPC server.
@@ -88,6 +96,7 @@ func (r *RuntimeServer) Start(errchan chan error) {
 	if err := r.registServer(); err != nil {
 		errchan <- err
 	}
+	logrus.Infof("runtime server start success")
 }
 
 //GetAppStatus get app service status
@@ -110,7 +119,17 @@ func (r *RuntimeServer) GetTenantResource(ctx context.Context, re *pb.TenantRequ
 	if res == nil {
 		return &tr, nil
 	}
-	tr.RunningAppNum = int64(len(r.store.GetTenantRunningApp(re.TenantId)))
+	// tr.RunningAppNum = int64(len(r.store.GetTenantRunningApp(re.TenantId)))
+	// tr.RunningAppNum = int64(len(r.store.GetTenantRunningApp(re.TenantId)))
+	runningApps := r.store.GetTenantRunningApp(re.TenantId)
+	for _, app := range runningApps {
+		if app.ServiceKind == model.ServiceKindThirdParty {
+			tr.RunningAppThirdNum++
+		} else if app.ServiceKind == model.ServiceKindInternal {
+			tr.RunningAppInternalNum++
+		}
+	}
+	tr.RunningAppNum = int64(len(runningApps))
 	tr.CpuLimit = res.CPULimit
 	tr.CpuRequest = res.CPURequest
 	tr.MemoryLimit = res.MemoryLimit / 1024 / 1024
@@ -124,45 +143,97 @@ func (r *RuntimeServer) GetTenantResource(ctx context.Context, re *pb.TenantRequ
 
 //GetAppPods get app pod list
 func (r *RuntimeServer) GetAppPods(ctx context.Context, re *pb.ServiceRequest) (*pb.ServiceAppPodList, error) {
-	var Pods []*pb.ServiceAppPod
 	app := r.store.GetAppService(re.ServiceId)
 	if app == nil {
-		return &pb.ServiceAppPodList{
-			Pods: Pods,
-		}, nil
+		return nil, ErrAppServiceNotFound
 	}
-	var deployType, deployID string
-	if deployment := app.GetDeployment(); deployment != nil {
-		deployType = "deployment"
-		deployID = deployment.Name
-	}
-	if statefulset := app.GetStatefulSet(); statefulset != nil {
-		deployType = "statefulset"
-		deployID = statefulset.Name
-	}
-	pods := app.GetPods()
+
+	pods := app.GetPods(false)
+	var oldpods, newpods []*pb.ServiceAppPod
 	for _, pod := range pods {
+		if v1.IsPodTerminated(pod) {
+			continue
+		}
+		// Exception pod information due to node loss is no longer displayed
+		if v1.IsPodNodeLost(pod) {
+			continue
+		}
 		var containers = make(map[string]*pb.Container, len(pod.Spec.Containers))
+		volumes := make([]string, 0)
 		for _, container := range pod.Spec.Containers {
 			containers[container.Name] = &pb.Container{
 				ContainerName: container.Name,
 				MemoryLimit:   container.Resources.Limits.Memory().Value(),
 			}
+			for _, vm := range container.VolumeMounts {
+				volumes = append(volumes, vm.Name)
+			}
 		}
-		Pods = append(Pods, &pb.ServiceAppPod{
-			ServiceId:  app.ServiceID,
-			DeployId:   deployID,
-			DeployType: deployType,
+
+		sapod := &pb.ServiceAppPod{
 			PodIp:      pod.Status.PodIP,
 			PodName:    pod.Name,
-			PodStatus:  string(pod.Status.Phase),
 			Containers: containers,
-		})
+			PodVolumes: volumes,
+		}
+		podStatus := &pb.PodStatus{}
+		wutil.DescribePodStatus(r.clientset, pod, podStatus, k8s.DefListEventsByPod)
+		sapod.PodStatus = podStatus.Type.String()
+		if app.DistinguishPod(pod) {
+			newpods = append(newpods, sapod)
+		} else {
+			oldpods = append(oldpods, sapod)
+		}
 	}
 
 	return &pb.ServiceAppPodList{
-		Pods: Pods,
+		OldPods: oldpods,
+		NewPods: newpods,
 	}, nil
+}
+
+// translateTimestampSince returns the elapsed time since timestamp in
+// human-readable approximation.
+func translateTimestampSince(timestamp metav1.Time) string {
+	if timestamp.IsZero() {
+		return "<unknown>"
+	}
+
+	return duration.HumanDuration(time.Since(timestamp.Time))
+}
+
+// formatEventSource formats EventSource as a comma separated string excluding Host when empty
+func formatEventSource(es corev1.EventSource) string {
+	EventSourceString := []string{es.Component}
+	if len(es.Host) > 0 {
+		EventSourceString = append(EventSourceString, es.Host)
+	}
+	return strings.Join(EventSourceString, ", ")
+}
+
+// DescribeEvents -
+func DescribeEvents(el *corev1.EventList) []*pb.PodEvent {
+	if len(el.Items) == 0 {
+		return nil
+	}
+	// sort.Sort(event.SortableEvents(el.Items)) TODO
+	var podEvents []*pb.PodEvent
+	for _, e := range el.Items {
+		var interval string
+		if e.Count > 1 {
+			interval = fmt.Sprintf("%s ago (x%d over %s)", translateTimestampSince(e.LastTimestamp), e.Count, translateTimestampSince(e.FirstTimestamp))
+		} else {
+			interval = translateTimestampSince(e.FirstTimestamp) + " ago"
+		}
+		podEvent := &pb.PodEvent{
+			Type:    e.Type,
+			Reason:  e.Reason,
+			Age:     interval,
+			Message: strings.TrimSpace(e.Message),
+		}
+		podEvents = append(podEvents, podEvent)
+	}
+	return podEvents
 }
 
 //GetDeployInfo get deploy info
@@ -173,18 +244,20 @@ func (r *RuntimeServer) GetDeployInfo(ctx context.Context, re *pb.ServiceRequest
 		deployinfo.Namespace = appService.TenantID
 		if appService.GetStatefulSet() != nil {
 			deployinfo.Statefuleset = appService.GetStatefulSet().Name
+			deployinfo.StartTime = appService.GetStatefulSet().ObjectMeta.CreationTimestamp.Format(time.RFC3339)
 		}
 		if appService.GetDeployment() != nil {
 			deployinfo.Deployment = appService.GetDeployment().Name
+			deployinfo.StartTime = appService.GetDeployment().ObjectMeta.CreationTimestamp.Format(time.RFC3339)
 		}
-		if services := appService.GetServices(); services != nil {
+		if services := appService.GetServices(false); services != nil {
 			service := make(map[string]string, len(services))
 			for _, s := range services {
 				service[s.Name] = s.Name
 			}
 			deployinfo.Services = service
 		}
-		if endpoints := appService.GetEndpoints(); endpoints != nil &&
+		if endpoints := appService.GetEndpoints(false); endpoints != nil &&
 			appService.AppServiceBase.ServiceKind == model.ServiceKindThirdParty {
 			eps := make(map[string]string, len(endpoints))
 			for _, s := range endpoints {
@@ -192,21 +265,21 @@ func (r *RuntimeServer) GetDeployInfo(ctx context.Context, re *pb.ServiceRequest
 			}
 			deployinfo.Endpoints = eps
 		}
-		if secrets := appService.GetSecrets(); secrets != nil {
+		if secrets := appService.GetSecrets(false); secrets != nil {
 			secretsinfo := make(map[string]string, len(secrets))
 			for _, s := range secrets {
 				secretsinfo[s.Name] = s.Name
 			}
 			deployinfo.Secrets = secretsinfo
 		}
-		if ingresses := appService.GetIngress(); ingresses != nil {
+		if ingresses := appService.GetIngress(false); ingresses != nil {
 			ingress := make(map[string]string, len(ingresses))
 			for _, s := range ingresses {
 				ingress[s.Name] = s.Name
 			}
 			deployinfo.Ingresses = ingress
 		}
-		if pods := appService.GetPods(); pods != nil {
+		if pods := appService.GetPods(false); pods != nil {
 			podNames := make(map[string]string, len(pods))
 			for _, s := range pods {
 				podNames[s.Name] = s.Name
@@ -238,7 +311,13 @@ func (r *RuntimeServer) registServer() error {
 		}, time.Second*3)
 	}
 	if r.keepalive == nil {
-		keepalive, err := discover.CreateKeepAlive(r.conf.EtcdEndPoints, "app_sync_runtime_server", "", r.conf.HostIP, r.conf.ServerPort)
+		etcdClientArgs := &etcdutil.ClientArgs{
+			Endpoints: r.conf.EtcdEndPoints,
+			CaFile:    r.conf.EtcdCaFile,
+			CertFile:  r.conf.EtcdCertFile,
+			KeyFile:   r.conf.EtcdKeyFile,
+		}
+		keepalive, err := discover.CreateKeepAlive(etcdClientArgs, "app_sync_runtime_server", "", r.conf.HostIP, r.conf.ServerPort)
 		if err != nil {
 			return fmt.Errorf("create app sync server keepalive error,%s", err.Error())
 		}
@@ -257,45 +336,54 @@ func (r *RuntimeServer) ListThirdPartyEndpoints(ctx context.Context, re *pb.Serv
 	// The same IP may correspond to two endpoints, which are internal and external endpoints.
 	// So it is need to filter the same IP.
 	exists := make(map[string]bool)
-	for _, ep := range as.GetEndpoints() {
+	addEndpoint := func(tpe *pb.ThirdPartyEndpoint) {
+		if !exists[fmt.Sprintf("%s:%d", tpe.Ip, tpe.Port)] {
+			pbeps = append(pbeps, tpe)
+			exists[fmt.Sprintf("%s:%d", tpe.Ip, tpe.Port)] = true
+		}
+	}
+	for _, ep := range as.GetEndpoints(false) {
 		if ep.Subsets == nil || len(ep.Subsets) == 0 {
 			logrus.Debugf("Key: %s; empty subsets", fmt.Sprintf("%s/%s", ep.Namespace, ep.Name))
 			continue
 		}
-		for idx, subset := range ep.Subsets {
-			if exists[subset.Ports[0].Name] {
-				continue
-			}
-			ip := func(subset corev1.EndpointSubset) string {
-				if subset.Addresses != nil && len(subset.Addresses) > 0 {
-					return subset.Addresses[0].IP
-				}
-				if subset.NotReadyAddresses != nil && len(subset.NotReadyAddresses) > 0 {
-					return subset.NotReadyAddresses[0].IP
-				}
-				return ""
-			}(subset)
-			if strings.TrimSpace(ip) == "" {
-				logrus.Debugf("Key: %s; Index: %d; IP not found", fmt.Sprintf("%s/%s", ep.Namespace, ep.Name), idx)
-				continue
-			}
-			exists[subset.Ports[0].Name] = true
-			pbep := &pb.ThirdPartyEndpoint{
-				Uuid: subset.Ports[0].Name,
-				Sid:  ep.GetLabels()["service_id"],
-				Ip:   ip,
-				Port: subset.Ports[0].Port,
-				Status: func(item *corev1.Endpoints) string {
-					if subset.Addresses != nil && len(subset.Addresses) > 0 {
-						return "healthy"
+		for _, subset := range ep.Subsets {
+			for _, port := range subset.Ports {
+				for _, address := range subset.Addresses {
+					ip := address.IP
+					if ip == "1.1.1.1" {
+						if len(as.GetServices(false)) > 0 {
+							ip = as.GetServices(false)[0].Annotations["domain"]
+						}
 					}
-					if subset.NotReadyAddresses != nil && len(subset.NotReadyAddresses) > 0 {
-						return "unhealthy"
+					addEndpoint(&pb.ThirdPartyEndpoint{
+						Uuid: port.Name,
+						Sid:  ep.GetLabels()["service_id"],
+						Ip:   ip,
+						Port: port.Port,
+						Status: func() string {
+							return "healthy"
+						}(),
+					})
+				}
+				for _, address := range subset.NotReadyAddresses {
+					ip := address.IP
+					if ip == "1.1.1.1" {
+						if len(as.GetServices(false)) > 0 {
+							ip = as.GetServices(false)[0].Annotations["domain"]
+						}
 					}
-					return "unknown"
-				}(ep),
+					addEndpoint(&pb.ThirdPartyEndpoint{
+						Uuid: port.Name,
+						Sid:  ep.GetLabels()["service_id"],
+						Ip:   ip,
+						Port: port.Port,
+						Status: func() string {
+							return "unhealthy"
+						}(),
+					})
+				}
 			}
-			pbeps = append(pbeps, pbep)
 		}
 	}
 	return &pb.ThirdPartyEndpoints{
@@ -360,7 +448,90 @@ func (r *RuntimeServer) DelThirdPartyEndpoint(ctx context.Context, re *pb.DelThi
 		Obj: &v1.RbdEndpoint{
 			UUID: re.Uuid,
 			Sid:  re.Sid,
+			IP:   re.Ip,
+			Port: int(re.Port),
 		},
 	}
 	return new(pb.Empty), nil
+}
+
+// GetStorageClasses get storageclass list
+func (r *RuntimeServer) GetStorageClasses(ctx context.Context, re *pb.Empty) (*pb.StorageClasses, error) {
+	storageclasses := new(pb.StorageClasses)
+	// stes := r.store.GetStorageClasses()
+
+	// if stes != nil {
+	// 	for _, st := range stes {
+	// 		var allowTopologies []*pb.TopologySelectorTerm
+	// 		for _, topologySelectorTerm := range st.AllowedTopologies {
+	// 			var expressions []*pb.TopologySelectorLabelRequirement
+	// 			for _, value := range topologySelectorTerm.MatchLabelExpressions {
+	// 				expressions = append(expressions, &pb.TopologySelectorLabelRequirement{Key: value.Key, Values: value.Values})
+	// 			}
+	// 			allowTopologies = append(allowTopologies, &pb.TopologySelectorTerm{MatchLabelExpressions: expressions})
+	// 		}
+
+	// 		var allowVolumeExpansion bool
+	// 		if st.AllowVolumeExpansion == nil {
+	// 			allowVolumeExpansion = false
+	// 		} else {
+	// 			allowVolumeExpansion = *st.AllowVolumeExpansion
+	// 		}
+	// 		storageclasses.List = append(storageclasses.List, &pb.StorageClassDetail{
+	// 			Name:                 st.Name,
+	// 			Provisioner:          st.Provisioner,
+	// 			Parameters:           st.Parameters,
+	// 			ReclaimPolicy:        st.ReclaimPolicy,
+	// 			AllowVolumeExpansion: allowVolumeExpansion,
+	// 			VolumeBindingMode:    st.VolumeBindingMode,
+	// 			AllowedTopologies:    allowTopologies,
+	// 		})
+	// 	}
+	// }
+	return storageclasses, nil
+}
+
+// GetAppVolumeStatus get app volume status
+func (r *RuntimeServer) GetAppVolumeStatus(ctx context.Context, re *pb.ServiceRequest) (*pb.ServiceVolumeStatusMessage, error) {
+	ret := new(pb.ServiceVolumeStatusMessage)
+	ret.Status = make(map[string]pb.ServiceVolumeStatus)
+	as := r.store.GetAppService(re.ServiceId)
+	if as == nil {
+		return ret, nil
+	}
+	appPodList, err := r.GetAppPods(ctx, re)
+	if err != nil {
+		logrus.Warnf("get volume status error : %s", err.Error())
+		return ret, nil
+	}
+	for _, pod := range appPodList.GetNewPods() {
+		for _, volumeName := range pod.PodVolumes {
+			prefix := "manual"
+			if strings.HasPrefix(volumeName, prefix) {
+				volumeName = strings.TrimPrefix(volumeName, prefix)
+				if pod.GetPodStatus() != pb.PodStatus_RUNNING.String() {
+					ret.Status[volumeName] = pb.ServiceVolumeStatus_NOT_READY // volumeName tranfer to serviceVolume's id in db
+				} else {
+					ret.Status[volumeName] = pb.ServiceVolumeStatus_READY // volumeName tranfer to serviceVolume's id in db
+				}
+
+			}
+		}
+	}
+
+	for _, pod := range appPodList.GetOldPods() {
+		for _, volumeName := range pod.PodVolumes {
+			prefix := "manual"
+			if strings.HasPrefix(volumeName, prefix) {
+				volumeName = strings.TrimPrefix(volumeName, prefix)
+				if pod.GetPodStatus() != pb.PodStatus_RUNNING.String() {
+					ret.Status[volumeName] = pb.ServiceVolumeStatus_NOT_READY // volumeName tranfer to serviceVolume's id in db
+				} else {
+					ret.Status[volumeName] = pb.ServiceVolumeStatus_READY // volumeName tranfer to serviceVolume's id in db
+				}
+			}
+		}
+	}
+
+	return ret, nil
 }

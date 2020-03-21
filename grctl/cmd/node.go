@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/goodrain/rainbond/util/ansible"
 
 	"github.com/fatih/color"
 
@@ -40,9 +42,13 @@ import (
 )
 
 func handleErr(err *util.APIHandleError) {
-	if err != nil && err.Err != nil {
-		fmt.Printf("Code %d, Msg:%v\n", err.Code, err.String())
-		os.Exit(1)
+	if err != nil {
+		if err.Err != nil {
+			fmt.Printf(err.String())
+			os.Exit(1)
+		} else {
+			fmt.Printf("API return %d", err.Code)
+		}
 	}
 }
 func showError(m string) {
@@ -53,48 +59,6 @@ func showError(m string) {
 func showSuccessMsg(m string) {
 	fmt.Printf("Success: %s\n", m)
 	os.Exit(0)
-}
-
-//NewCmdShow show
-func NewCmdShow() cli.Command {
-	c := cli.Command{
-		Name:  "show",
-		Usage: "Display region info",
-		Action: func(c *cli.Context) error {
-			Common(c)
-			manageHosts, err := clients.RegionClient.Nodes().GetNodeByRule("manage")
-			handleErr(err)
-			ips := getExternalIP("/opt/rainbond/.init/.ip", manageHosts)
-			fmt.Println("Manage your apps with webui:\n-------------------------------")
-			for _, v := range ips {
-				url := v + ":7070"
-				fmt.Print(url + "  ")
-			}
-			fmt.Println("\n")
-			//fmt.Println("The webui use websocket to provide more feture：")
-			//for _, v := range ips {
-			//	url := v + ":6060"
-			//	fmt.Print(url + "  ")
-			//}
-			//fmt.Println()
-			//fmt.Println("Your web apps use nginx for reverse proxy:")
-			//for _, v := range ips {
-			//	url := v + ":80"
-			//	fmt.Print(url + "  ")
-			//}
-			//fmt.Println()
-			if fileExist("/opt/rainbond/.init/.regioninfo") {
-				regionInfo, err := ioutil.ReadFile("/opt/rainbond/.init/.regioninfo")
-				if err != nil {
-					return nil
-				}
-				fmt.Println("Current data center information:\n-------------------------------")
-				fmt.Println(string(regionInfo))
-			}
-			return nil
-		},
-	}
-	return c
 }
 
 func getExternalIP(path string, node []*client.HostNode) []string {
@@ -150,6 +114,10 @@ func getStatusShow(v *client.HostNode) (status string) {
 		nss.message = append(nss.message, "unhealth")
 		nss.color = color.FgRed
 	}
+	if v.NodeStatus.Status == client.Offline {
+		nss.message = append(nss.message, client.Offline)
+		nss.color = color.FgRed
+	}
 
 	result := nss.String()
 	if strings.Contains(result, "unknown") {
@@ -167,11 +135,11 @@ func handleConditionResult(serviceTable *termtables.Table, conditions []client.N
 			continue
 		}
 		var formatReady string
-		if v.Status == client.ConditionFalse {
+		if v.Status == client.ConditionFalse || v.Status == client.ConditionUnknown {
 			if v.Type == client.OutOfDisk || v.Type == client.MemoryPressure || v.Type == client.DiskPressure || v.Type == client.InstallNotReady {
 				formatReady = "\033[0;32;32m false \033[0m"
 			} else {
-				formatReady = "\033[0;31;31m false \033[0m"
+				formatReady = fmt.Sprintf("\033[0;31;31m %s \033[0m", v.Status)
 			}
 		} else {
 			if v.Type == client.OutOfDisk || v.Type == client.MemoryPressure || v.Type == client.DiskPressure || v.Type == client.InstallNotReady {
@@ -180,7 +148,11 @@ func handleConditionResult(serviceTable *termtables.Table, conditions []client.N
 				formatReady = "\033[0;32;32m true \033[0m"
 			}
 		}
-		serviceTable.AddRow(string(v.Type), formatReady, handleMessage(string(v.Status), v.Message))
+		serviceTable.AddRow(string(v.Type), formatReady,
+			v.LastHeartbeatTime.Format(time.RFC3339)[:19],
+			v.LastTransitionTime.Format(time.RFC3339)[:19],
+			handleMessage(string(v.Status), v.Message),
+		)
 	}
 }
 
@@ -193,7 +165,10 @@ func extractReady(serviceTable *termtables.Table, conditions []client.NodeCondit
 			} else {
 				formatReady = "\033[0;32;32m true \033[0m"
 			}
-			serviceTable.AddRow("\033[0;33;33m "+string(v.Type)+" \033[0m", formatReady, handleMessage(string(v.Status), v.Message))
+			serviceTable.AddRow("\033[0;33;33m "+string(v.Type)+" \033[0m", formatReady,
+				v.LastHeartbeatTime.Format(time.RFC3339)[:19],
+				v.LastTransitionTime.Format(time.RFC3339)[:19],
+				handleMessage(string(v.Status), v.Message))
 		}
 	}
 }
@@ -237,6 +212,7 @@ func NewCmdNode() cli.Command {
 					fmt.Printf("-------------------Node Information-----------------------\n")
 					table.AddRow("uuid", v.ID)
 					table.AddRow("host_name", v.HostName)
+					table.AddRow("health", v.NodeStatus.NodeHealth)
 					table.AddRow("create_time", v.CreateTime)
 					table.AddRow("internal_ip", v.InternalIP)
 					table.AddRow("external_ip", v.ExternalIP)
@@ -245,7 +221,6 @@ func NewCmdNode() cli.Command {
 					table.AddRow("available_memory", fmt.Sprintf("%d GB", v.AvailableMemory/1024/1024/1024))
 					table.AddRow("available_cpu", fmt.Sprintf("%d Core", v.AvailableCPU))
 					table.AddRow("status", v.Status)
-					table.AddRow("health", v.NodeStatus.NodeHealth)
 					table.AddRow("schedulable(set)", !v.Unschedulable)
 					table.AddRow("schedulable(current)", v.NodeStatus.CurrentScheduleStatus)
 					table.AddRow("version", v.NodeStatus.Version)
@@ -254,13 +229,14 @@ func NewCmdNode() cli.Command {
 					fmt.Println(table)
 					fmt.Printf("-------------------Node Labels-----------------------\n")
 					labeltable := uitable.New()
+					// TODO: distinguish system labels and custom labels
 					for k, v := range v.Labels {
 						labeltable.AddRow(k, v)
 					}
 					fmt.Println(labeltable)
 					fmt.Printf("-------------------Service health-----------------------\n")
 					serviceTable := termtables.CreateTable()
-					serviceTable.AddHeaders("Condition", "Result", "Message")
+					serviceTable.AddHeaders("Condition", "Health", "LastUpdateTime", "LastChangeTime", "Message")
 					extractReady(serviceTable, v.NodeStatus.Conditions, "Ready")
 					handleConditionResult(serviceTable, v.NodeStatus.Conditions)
 					fmt.Println(serviceTable.Render())
@@ -309,45 +285,49 @@ func NewCmdNode() cli.Command {
 							handleErr(err)
 							CPURequests := strconv.FormatFloat(float64(nodeResource.CPURequests)/float64(1000), 'f', 2, 64)
 							CPULimits := strconv.FormatFloat(float64(nodeResource.CPULimits)/float64(1000), 'f', 2, 64)
-							serviceTable.AddRow(v.ID, v.HostName, nodeResource.CpuR, nodeResource.MemR, CPURequests, nodeResource.MemoryRequests, CPULimits, nodeResource.MemoryLimits, nodeResource.CPURequestsR, nodeResource.MemoryRequestsR)
+							serviceTable.AddRow(v.ID, v.HostName, nodeResource.CPU, nodeResource.MemR, CPURequests,
+								nodeResource.MemoryRequests, CPULimits,
+								nodeResource.MemoryLimits,
+								nodeResource.CPURequestsR,
+								nodeResource.MemoryRequestsR)
 						}
 					}
 					fmt.Println(serviceTable.Render())
 					return nil
 				},
 			},
-			{
-				Name:  "up",
-				Usage: "up hostID",
-				Action: func(c *cli.Context) error {
-					Common(c)
-					id := c.Args().First()
-					if id == "" {
-						logrus.Errorf("need hostID")
-						return nil
-					}
-					err := clients.RegionClient.Nodes().Up(id)
-					handleErr(err)
-					fmt.Printf("up node %s  success\n", id)
-					return nil
-				},
-			},
-			{
-				Name:  "down",
-				Usage: "down hostID",
-				Action: func(c *cli.Context) error {
-					Common(c)
-					id := c.Args().First()
-					if id == "" {
-						logrus.Errorf("need hostID")
-						return nil
-					}
-					err := clients.RegionClient.Nodes().Down(id)
-					handleErr(err)
-					fmt.Printf("down node %s  success\n", id)
-					return nil
-				},
-			},
+			// {
+			// 	Name:  "up",
+			// 	Usage: "up hostID",
+			// 	Action: func(c *cli.Context) error {
+			// 		Common(c)
+			// 		id := c.Args().First()
+			// 		if id == "" {
+			// 			logrus.Errorf("need hostID")
+			// 			return nil
+			// 		}
+			// 		err := clients.RegionClient.Nodes().Up(id)
+			// 		handleErr(err)
+			// 		fmt.Printf("up node %s  success\n", id)
+			// 		return nil
+			// 	},
+			// },
+			// {
+			// 	Name:  "down",
+			// 	Usage: "down hostID",
+			// 	Action: func(c *cli.Context) error {
+			// 		Common(c)
+			// 		id := c.Args().First()
+			// 		if id == "" {
+			// 			logrus.Errorf("need hostID")
+			// 			return nil
+			// 		}
+			// 		err := clients.RegionClient.Nodes().Down(id)
+			// 		handleErr(err)
+			// 		fmt.Printf("down node %s  success\n", id)
+			// 		return nil
+			// 	},
+			// },
 			{
 				Name:  "cordon",
 				Usage: "Mark node as unschedulable",
@@ -456,6 +436,10 @@ func NewCmdNode() cli.Command {
 							}
 							k := c.String("key")
 							v := c.String("val")
+							if k == "" || v == "" {
+								logrus.Errorf("label key or value can not be empty")
+								return nil
+							}
 							err := clients.RegionClient.Nodes().Label(hostID).Add(k, v)
 							handleErr(err)
 							return nil
@@ -533,7 +517,7 @@ func NewCmdNode() cli.Command {
 							conditions, err := clients.RegionClient.Nodes().Condition(hostID).List()
 							handleErr(err)
 							serviceTable := termtables.CreateTable()
-							serviceTable.AddHeaders("Condition", "Result", "Message")
+							serviceTable.AddHeaders("Condition", "Health", "LastUpdateTime", "LastChangeTime", "Message")
 							handleConditionResult(serviceTable, conditions)
 							fmt.Println(serviceTable.Render())
 							return nil
@@ -541,56 +525,77 @@ func NewCmdNode() cli.Command {
 					},
 				},
 			},
-			{
-				Name:  "add",
-				Usage: "Add a node into the cluster",
-				Flags: []cli.Flag{
-					cli.StringFlag{
-						Name:  "hostname,host",
-						Usage: "The option is required",
-					},
-					cli.StringFlag{
-						Name:  "internal-ip,iip",
-						Usage: "The option is required",
-					},
-					cli.StringFlag{
-						Name:  "external-ip,eip",
-						Usage: "Publish the ip address for external connection",
-					},
-					cli.StringFlag{
-						Name:  "root-pass,p",
-						Usage: "Specify the root password of the target host for login, this option conflicts with private-key",
-					},
-					cli.StringFlag{
-						Name:  "private-key,key",
-						Usage: "Specify the private key file for login, this option conflicts with root-pass",
-					},
-					cli.StringSliceFlag{
-						Name:  "role,r",
-						Usage: "The option is required, the allowed values are: [manage|compute|gateway]",
-					},
-					cli.StringFlag{
-						Name:  "podCIDR,cidr",
-						Usage: "Defines the IP assignment range for the specified node, which is automatically specified if not specified",
-					},
-					cli.StringFlag{
-						Name:  "id",
-						Usage: "Specify node ID",
-					},
-					cli.BoolFlag{
-						Name:  "install",
-						Usage: "Automatic installation after addition",
-					},
-				},
-				Action: addNodeCommand,
-			},
-			{
+			// {
+			// 	Name:  "add",
+			// 	Usage: "Add a node into the cluster",
+			// 	Flags: []cli.Flag{
+			// 		cli.StringFlag{
+			// 			Name:  "hostname,host",
+			// 			Usage: "The option is required",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "hosts-file-path",
+			// 			Usage: "hosts file path",
+			// 			Value: "/opt/rainbond/rainbond-ansible/inventory/hosts",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "config-file-path",
+			// 			Usage: "ansible global config file path",
+			// 			Value: "/opt/rainbond/rainbond-ansible/scripts/installer/global.sh",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "internal-ip,iip",
+			// 			Usage: "The option is required",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "external-ip,eip",
+			// 			Usage: "Publish the ip address for external connection",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "root-pass,p",
+			// 			Usage: "Specify the root password of the target host for login, this option conflicts with private-key",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "private-key,key",
+			// 			Usage: "Specify the private key file for login, this option conflicts with root-pass",
+			// 		},
+			// 		cli.StringSliceFlag{
+			// 			Name:  "role,r",
+			// 			Usage: "The option is required, the allowed values are: [manage|compute|gateway]",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "podCIDR,cidr",
+			// 			Usage: "Defines the IP assignment range for the specified node, which is automatically specified if not specified",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "id",
+			// 			Usage: "Specify node ID",
+			// 		},
+			// 		cli.BoolFlag{
+			// 			Name:  "install",
+			// 			Usage: "Automatic installation after addition",
+			// 		},
+			// 	},
+			// 	Action: addNodeCommand,
+			// },
+			// {
 
-				Name:   "install",
-				Usage:  "Install a exist node into the cluster",
-				Flags:  []cli.Flag{},
-				Action: installNodeCommand,
-			},
+			// 	Name:  "install",
+			// 	Usage: "Install a exist node into the cluster",
+			// 	Flags: []cli.Flag{
+			// 		cli.StringFlag{
+			// 			Name:  "hosts-file-path",
+			// 			Usage: "hosts file path",
+			// 			Value: "/opt/rainbond/rainbond-ansible/inventory/hosts",
+			// 		},
+			// 		cli.StringFlag{
+			// 			Name:  "config-file-path",
+			// 			Usage: "ansible global config file path",
+			// 			Value: "/opt/rainbond/rainbond-ansible/scripts/installer/global.sh",
+			// 		},
+			// 	},
+			// 	Action: installNodeCommand,
+			// },
 		},
 	}
 	return c
@@ -608,26 +613,27 @@ func isNodeReady(node *client.HostNode) bool {
 }
 
 func installNode(node *client.HostNode) {
-	linkModel := "pass"
-	if node.KeyPath != "" {
-		linkModel = "key"
-	}
 	// start add node script
 	logrus.Infof("Begin install node %s", node.ID)
-	if ok, _ := coreutil.FileExists("/opt/rainbond/rainbond-ansible/scripts/node.sh"); !ok {
-		logrus.Errorf("install node scripts is not found")
-		return
-	}
-	line := fmt.Sprintf("/opt/rainbond/rainbond-ansible/scripts/node.sh %s %s %s %s %s %s %s", node.Role[0], node.HostName,
-		node.InternalIP, linkModel, node.RootPass, node.KeyPath, node.ID)
-	cmd := exec.Command("bash", "-c", line)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
+	// node stauts: installing
 	if _, err := clients.RegionClient.Nodes().UpdateNodeStatus(node.ID, client.Installing); err != nil {
 		logrus.Errorf("update node %s status failure %s", node.ID, err.Error())
 	}
-	err := cmd.Run()
+	// install node
+	option := ansible.NodeInstallOption{
+		HostRole:   node.Role.String(),
+		HostName:   node.HostName,
+		InternalIP: node.InternalIP,
+		RootPass:   node.RootPass,
+		KeyPath:    node.KeyPath,
+		NodeID:     node.ID,
+		Stdin:      os.Stdin,
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+	}
+
+	err := ansible.RunNodeInstallCmd(option)
+
 	if err != nil {
 		logrus.Errorf("Error executing shell script %s", err.Error())
 		if _, err := clients.RegionClient.Nodes().UpdateNodeStatus(node.ID, client.InstallFailed); err != nil {
@@ -635,6 +641,8 @@ func installNode(node *client.HostNode) {
 		}
 		return
 	}
+
+	// node status success
 	if _, err := clients.RegionClient.Nodes().UpdateNodeStatus(node.ID, client.InstallSuccess); err != nil {
 		logrus.Errorf("update node %s status failure %s", node.ID, err.Error())
 	}
@@ -649,6 +657,9 @@ func addNodeCommand(c *cli.Context) error {
 	Common(c)
 	if !c.IsSet("role") {
 		showError("role must not null")
+	}
+	if c.String("internal-ip") == "" || !coreutil.CheckIP(c.String("internal-ip")) {
+		showError(fmt.Sprintf("internal ip(%s) is invalid", c.String("internal-ip")))
 	}
 	if c.String("root-pass") != "" && c.String("private-key") != "" {
 		showError("Options private-key and root-pass are conflicting")
@@ -668,7 +679,6 @@ func addNodeCommand(c *cli.Context) error {
 	if err := node.Role.Validation(); err != nil {
 		showError(err.Error())
 	}
-	fmt.Println(node.Role)
 	node.HostName = c.String("hostname")
 	node.RootPass = c.String("root-pass")
 	node.InternalIP = c.String("internal-ip")
@@ -680,7 +690,10 @@ func addNodeCommand(c *cli.Context) error {
 	renode, err := clients.RegionClient.Nodes().Add(&node)
 	handleErr(err)
 	if c.Bool("install") {
+		nodes, err := clients.RegionClient.Nodes().List()
 		handleErr(err)
+		//write ansible hosts file
+		WriteHostsFile(c.String("hosts-file-path"), c.String("config-file-path"), nodes)
 		installNode(renode)
 	} else {
 		fmt.Printf("success add %s node %s \n you install it by running: grctl node install %s \n", renode.Role, renode.ID, renode.ID)
@@ -696,6 +709,10 @@ func installNodeCommand(c *cli.Context) error {
 	}
 	node, err := clients.RegionClient.Nodes().Get(nodeID)
 	handleErr(err)
+	nodes, err := clients.RegionClient.Nodes().List()
+	handleErr(err)
+	//write ansible hosts file
+	WriteHostsFile(c.String("hosts-file-path"), c.String("config-file-path"), nodes)
 	installNode(node)
 	return nil
 }

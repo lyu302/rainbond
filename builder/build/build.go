@@ -19,13 +19,14 @@
 package build
 
 import (
+	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/goodrain/rainbond/builder"
 	"github.com/goodrain/rainbond/builder/parser/code"
 	"github.com/goodrain/rainbond/event"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/docker/docker/client"
 )
@@ -71,6 +72,8 @@ type Response struct {
 
 //Request build input
 type Request struct {
+	GRDataPVCName string
+	CachePVCName  string
 	TenantID      string
 	SourceDir     string
 	CacheDir      string
@@ -87,6 +90,19 @@ type Request struct {
 	BuildEnvs     map[string]string
 	Logger        event.Logger
 	DockerClient  *client.Client
+	KubeClient    kubernetes.Interface
+	ExtraHosts    []string
+	HostAlias     []HostAlias
+	Ctx           context.Context
+}
+
+// HostAlias holds the mapping between IP and hostnames that will be injected as an entry in the
+// pod's hosts file.
+type HostAlias struct {
+	// IP address of the host file entry.
+	IP string `json:"ip,omitempty" protobuf:"bytes,1,opt,name=ip"`
+	// Hostnames for the above IP address.
+	Hostnames []string `json:"hostnames,omitempty" protobuf:"bytes,2,rep,name=hostnames"`
 }
 
 //Commit Commit
@@ -105,15 +121,6 @@ func GetBuild(lang code.Lang) (Build, error) {
 }
 
 //CreateImageName create image name
-func CreateImageName(repoURL, serviceAlias, deployversion string) string {
-	reg := regexp.MustCompile(`.*(?:\:|\/)([\w\-\.]+)/([\w\-\.]+)\.git`)
-	rc := reg.FindSubmatch([]byte(repoURL))
-	var name string
-	if len(rc) == 3 {
-		name = fmt.Sprintf("%s_%s_%s", serviceAlias, string(rc[1]), string(rc[2]))
-	} else {
-		name = fmt.Sprintf("%s_%s", serviceAlias, "rainbondbuild")
-	}
-	buildImageName := strings.ToLower(fmt.Sprintf("%s/%s:%s", builder.REGISTRYDOMAIN, name, deployversion))
-	return buildImageName
+func CreateImageName(serviceID, deployversion string) string {
+	return strings.ToLower(fmt.Sprintf("%s/%s:%s", builder.REGISTRYDOMAIN, serviceID, deployversion))
 }

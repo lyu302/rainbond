@@ -22,9 +22,9 @@ import (
 	"context"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/coreos/etcd/clientv3"
 	etcdnaming "github.com/coreos/etcd/clientv3/naming"
 	"github.com/goodrain/rainbond/db/model"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 	v1 "github.com/goodrain/rainbond/worker/appm/types/v1"
 	"github.com/goodrain/rainbond/worker/server/pb"
 	"google.golang.org/grpc"
@@ -41,6 +41,9 @@ type AppRuntimeSyncClient struct {
 //AppRuntimeSyncClientConf client conf
 type AppRuntimeSyncClientConf struct {
 	EtcdEndpoints        []string
+	EtcdCaFile           string
+	EtcdCertFile         string
+	EtcdKeyFile          string
 	DefaultServerAddress []string
 }
 
@@ -50,13 +53,16 @@ func NewClient(ctx context.Context, conf AppRuntimeSyncClientConf) (*AppRuntimeS
 	var arsc AppRuntimeSyncClient
 	arsc.AppRuntimeSyncClientConf = conf
 	arsc.ctx = ctx
-	c, err := clientv3.New(clientv3.Config{Endpoints: conf.EtcdEndpoints, Context: ctx})
-	if err != nil {
-		return nil, err
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: conf.EtcdEndpoints,
+		CaFile:    conf.EtcdCaFile,
+		CertFile:  conf.EtcdCertFile,
+		KeyFile:   conf.EtcdKeyFile,
 	}
+	c, err := etcdutil.NewClient(ctx, etcdClientArgs)
 	r := &etcdnaming.GRPCResolver{Client: c}
 	b := grpc.RoundRobin(r)
-	arsc.cc, err = grpc.DialContext(ctx, "/rainbond/discover/app_sync_runtime_server", grpc.WithBalancer(b), grpc.WithInsecure())
+	arsc.cc, err = grpc.DialContext(ctx, "/rainbond/discover/app_sync_runtime_server", grpc.WithBalancer(b), grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
 		return nil, err
 	}
@@ -190,11 +196,27 @@ func (a *AppRuntimeSyncClient) UpdThirdPartyEndpoint(req *model.Endpoint) {
 }
 
 // DelThirdPartyEndpoint -
-func (a *AppRuntimeSyncClient) DelThirdPartyEndpoint(uuid, sid string) {
+func (a *AppRuntimeSyncClient) DelThirdPartyEndpoint(req *model.Endpoint) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	_, _ = a.AppRuntimeSyncClient.DelThirdPartyEndpoint(ctx, &pb.DelThirdPartyEndpointsReq{
-		Uuid: uuid,
-		Sid:  sid,
+		Uuid: req.UUID,
+		Sid:  req.ServiceID,
+		Ip:   req.IP,
+		Port: int32(req.Port),
 	})
+}
+
+// GetStorageClasses client GetStorageClasses
+func (a *AppRuntimeSyncClient) GetStorageClasses() (storageclasses *pb.StorageClasses, err error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	return a.AppRuntimeSyncClient.GetStorageClasses(ctx, &pb.Empty{})
+}
+
+// GetAppVolumeStatus get app volume status
+func (a *AppRuntimeSyncClient) GetAppVolumeStatus(serviceID string) (*pb.ServiceVolumeStatusMessage, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	return a.AppRuntimeSyncClient.GetAppVolumeStatus(ctx, &pb.ServiceRequest{ServiceId: serviceID})
 }

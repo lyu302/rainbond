@@ -21,41 +21,32 @@ package discover
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/clientv3"
 	client "github.com/coreos/etcd/clientv3"
 	"github.com/goodrain/rainbond/util"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 )
 
 //KeepAlive 服务注册
 type KeepAlive struct {
-	EtcdEndpoint []string
-	ServerName   string
-	HostName     string
-	Endpoint     string
-	TTL          int64
-	LID          clientv3.LeaseID
-	Done         chan struct{}
-	etcdClient   *client.Client
+	cancel        context.CancelFunc
+	EtcdClentArgs *etcdutil.ClientArgs
+	ServerName    string
+	HostName      string
+	Endpoint      string
+	TTL           int64
+	LID           clientv3.LeaseID
+	Done          chan struct{}
+	etcdClient    *client.Client
 }
 
 //CreateKeepAlive create keepalive for server
-func CreateKeepAlive(EtcdEndpoint []string, ServerName string, HostName string, HostIP string, Port int) (*KeepAlive, error) {
-	if len(EtcdEndpoint) == 0 {
-		EtcdEndpoint = []string{"127.0.0.1:2379"}
-	}
+func CreateKeepAlive(etcdClientArgs *etcdutil.ClientArgs, ServerName string, HostName string, HostIP string, Port int) (*KeepAlive, error) {
 	if ServerName == "" || Port == 0 {
 		return nil, fmt.Errorf("servername or serverport can not be empty")
-	}
-	if HostName == "" {
-		var err error
-		HostName, err = os.Hostname()
-		if err != nil {
-			return nil, err
-		}
 	}
 	if HostIP == "" {
 		ip, err := util.LocalIP()
@@ -65,13 +56,14 @@ func CreateKeepAlive(EtcdEndpoint []string, ServerName string, HostName string, 
 		}
 		HostIP = ip.String()
 	}
+	HostName = HostIP
 	return &KeepAlive{
-		EtcdEndpoint: EtcdEndpoint,
-		ServerName:   ServerName,
-		HostName:     HostName,
-		Endpoint:     fmt.Sprintf("%s:%d", HostIP, Port),
-		TTL:          5,
-		Done:         make(chan struct{}),
+		EtcdClentArgs: etcdClientArgs,
+		ServerName:    ServerName,
+		HostName:      HostName,
+		Endpoint:      fmt.Sprintf("%s:%d", HostIP, Port),
+		TTL:           10,
+		Done:          make(chan struct{}),
 	}, nil
 }
 
@@ -79,13 +71,13 @@ func CreateKeepAlive(EtcdEndpoint []string, ServerName string, HostName string, 
 func (k *KeepAlive) Start() error {
 	duration := time.Duration(k.TTL) * time.Second
 	timer := time.NewTimer(duration)
-	etcdclient, err := client.New(client.Config{
-		Endpoints: k.EtcdEndpoint,
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	etcdclient, err := etcdutil.NewClient(ctx, k.EtcdClentArgs)
 	if err != nil {
 		return err
 	}
 	k.etcdClient = etcdclient
+	k.cancel = cancel
 	go func() {
 		for {
 			select {
@@ -94,7 +86,7 @@ func (k *KeepAlive) Start() error {
 			case <-timer.C:
 				if k.LID > 0 {
 					func() {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 						defer cancel()
 						_, err := k.etcdClient.KeepAliveOnce(ctx, k.LID)
 						if err == nil {
@@ -144,6 +136,8 @@ func (k *KeepAlive) reg() error {
 //Stop 结束
 func (k *KeepAlive) Stop() error {
 	close(k.Done)
+	defer k.cancel()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	if _, err := k.etcdClient.Delete(ctx, k.etcdKey()); err != nil {

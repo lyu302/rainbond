@@ -28,6 +28,7 @@ import (
 	"github.com/goodrain/rainbond/db"
 	dbmodel "github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/util"
+
 	"github.com/goodrain/rainbond/worker/client"
 )
 
@@ -48,6 +49,13 @@ func Create3rdPartySvcHandler(dbmanager db.Manager, statusCli *client.AppRuntime
 // AddEndpoints adds endpoints for third-party service.
 func (t *ThirdPartyServiceHanlder) AddEndpoints(sid string, d *model.AddEndpiontsReq) error {
 	address, port := convertAddressPort(d.Address)
+	if port == 0 {
+		//set default port by service port
+		ports, _ := t.dbmanager.TenantServicesPortDao().GetPortsByServiceID(sid)
+		if len(ports) > 0 {
+			port = ports[0].ContainerPort
+		}
+	}
 	ep := &dbmodel.Endpoint{
 		UUID:      util.NewUUID(),
 		ServiceID: sid,
@@ -59,6 +67,7 @@ func (t *ThirdPartyServiceHanlder) AddEndpoints(sid string, d *model.AddEndpiont
 		return err
 	}
 
+	logrus.Debugf("add new endpoint[address: %s, port: %d]", address, port)
 	t.statusCli.AddThirdPartyEndpoint(ep)
 	return nil
 }
@@ -86,28 +95,38 @@ func (t *ThirdPartyServiceHanlder) UpdEndpoints(d *model.UpdEndpiontsReq) error 
 }
 
 func convertAddressPort(s string) (address string, port int) {
-	addressport := strings.Split(s, ":")
-	// compatible with ipv6
-	addressSli := addressport[:func() int {
-		if len(addressport) == 2 {
-			return len(addressport) - 1
-		}
-		return len(addressport)
-	}()]
-	address = strings.Join(addressSli, ":")
-	if len(addressport) == 2 {
-		port, _ = strconv.Atoi(addressport[1])
+	prefix := ""
+	if strings.HasPrefix(s, "https://") {
+		s = strings.Split(s, "https://")[1]
+		prefix = "https://"
 	}
+	if strings.HasPrefix(s, "http://") {
+		s = strings.Split(s, "http://")[1]
+		prefix = "http://"
+	}
+
+	if strings.Contains(s, ":") {
+		sp := strings.Split(s, ":")
+		address = prefix + sp[0]
+		port, _ = strconv.Atoi(sp[1])
+	} else {
+		address = prefix + s
+	}
+
 	return address, port
 }
 
 // DelEndpoints deletes endpoints for third-party service.
 func (t *ThirdPartyServiceHanlder) DelEndpoints(epid, sid string) error {
+	ep, err := t.dbmanager.EndpointsDao().GetByUUID(epid)
+	if err != nil {
+		logrus.Warningf("EpID: %s; error getting endpoints: %v", epid, err)
+		return err
+	}
 	if err := t.dbmanager.EndpointsDao().DelByUUID(epid); err != nil {
 		return err
 	}
-
-	t.statusCli.DelThirdPartyEndpoint(epid, sid)
+	t.statusCli.DelThirdPartyEndpoint(ep)
 
 	return nil
 }
@@ -120,7 +139,7 @@ func (t *ThirdPartyServiceHanlder) ListEndpoints(sid string) ([]*model.EndpointR
 	}
 	m := make(map[string]*model.EndpointResp)
 	for _, item := range endpoints {
-		m[item.UUID] = &model.EndpointResp{
+		ep := &model.EndpointResp{
 			EpID: item.UUID,
 			Address: func(ip string, p int) string {
 				if p != 0 {
@@ -132,8 +151,8 @@ func (t *ThirdPartyServiceHanlder) ListEndpoints(sid string) ([]*model.EndpointR
 			IsOnline: false,
 			IsStatic: true,
 		}
+		m[ep.Address] = ep
 	}
-
 	thirdPartyEndpoints, err := t.statusCli.ListThirdPartyEndpoints(sid)
 	if err != nil {
 		logrus.Warningf("ServiceID: %s; grpc; error listing third-party endpoints: %v", sid, err)
@@ -141,26 +160,25 @@ func (t *ThirdPartyServiceHanlder) ListEndpoints(sid string) ([]*model.EndpointR
 	}
 	if thirdPartyEndpoints != nil && thirdPartyEndpoints.Obj != nil {
 		for _, item := range thirdPartyEndpoints.Obj {
-			ep := m[item.Uuid]
+			ep := m[fmt.Sprintf("%s:%d", item.Ip, item.Port)]
 			if ep != nil {
 				ep.IsOnline = true
 				ep.Status = item.Status
 				continue
 			}
-			m[item.Uuid] = &model.EndpointResp{
+			rep := &model.EndpointResp{
 				EpID:     item.Uuid,
 				Address:  item.Ip,
 				Status:   item.Status,
 				IsOnline: true,
 				IsStatic: false,
 			}
+			m[rep.Address] = rep
 		}
 	}
-
 	var res []*model.EndpointResp
 	for _, item := range m {
 		res = append(res, item)
 	}
-
 	return res, nil
 }

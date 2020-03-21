@@ -20,6 +20,8 @@ package store
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -28,6 +30,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/goodrain/rainbond/gateway/cluster"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/eapache/channels"
@@ -38,8 +42,10 @@ import (
 	"github.com/goodrain/rainbond/gateway/controller/config"
 	"github.com/goodrain/rainbond/gateway/defaults"
 	"github.com/goodrain/rainbond/gateway/util"
-	"github.com/goodrain/rainbond/gateway/v1"
+	v1 "github.com/goodrain/rainbond/gateway/v1"
+	coreutil "github.com/goodrain/rainbond/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/extensions/v1beta1"
 	extensions "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
@@ -137,12 +143,15 @@ type k8sStore struct {
 
 	// backendConfigMu protects against simultaneous read/write of backendConfig
 	backendConfigMu *sync.RWMutex
+	// Node controller to get the available IP address of the current node
+	node     *cluster.NodeManager
+	updateCh *channels.RingChannel
 }
 
 // New creates a new Storer
 func New(client kubernetes.Interface,
 	updateCh *channels.RingChannel,
-	conf *option.Config) Storer {
+	conf *option.Config, node *cluster.NodeManager) Storer {
 	store := &k8sStore{
 		client:    client,
 		informers: &Informer{},
@@ -154,6 +163,8 @@ func New(client kubernetes.Interface,
 		conf:            conf,
 		backendConfigMu: &sync.RWMutex{},
 		backendConfig:   config.NewDefault(),
+		node:            node,
+		updateCh:        updateCh,
 	}
 
 	store.annotations = annotations.NewAnnotationExtractor(store)
@@ -162,7 +173,7 @@ func New(client kubernetes.Interface,
 	// create informers factory, enable and assign required informers
 	store.sharedInformer = informers.NewFilteredSharedInformerFactory(client, conf.ResyncPeriod, corev1.NamespaceAll,
 		func(options *metav1.ListOptions) {
-			options.LabelSelector = "creater=Rainbond"
+			options.LabelSelector = "creator=Rainbond"
 		})
 
 	store.informers.Ingress = store.sharedInformer.Extensions().V1beta1().Ingresses().Informer()
@@ -180,7 +191,6 @@ func New(client kubernetes.Interface,
 	ingEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			ing := obj.(*extensions.Ingress)
-			logrus.Debugf("Received ingress: %v", ing)
 
 			// updating annotations information for ingress
 			store.extractAnnotations(ing)
@@ -207,12 +217,9 @@ func New(client kubernetes.Interface,
 			if oldIng.ResourceVersion == curIng.ResourceVersion || reflect.DeepEqual(oldIng, curIng) {
 				return
 			}
-			logrus.Debugf("Received ingress: %v", curIng)
-
 			store.extractAnnotations(curIng)
 			store.secretIngressMap.update(curIng)
 			store.syncSecrets(curIng)
-
 			updateCh.In() <- Event{
 				Type: UpdateEvent,
 				Obj:  cur,
@@ -379,7 +386,6 @@ func (s *k8sStore) ListPool() ([]*v1.Pool, []*v1.Pool) {
 	l4Pools := make(map[string]*v1.Pool)
 	for _, item := range s.listers.Endpoint.List() {
 		ep := item.(*corev1.Endpoints)
-
 		if ep.Subsets != nil || len(ep.Subsets) != 0 {
 			epn := ep.ObjectMeta.Name
 			// l7
@@ -391,25 +397,37 @@ func (s *k8sStore) ListPool() ([]*v1.Pool, []*v1.Pool) {
 						Nodes: []*v1.Node{},
 					}
 					pool.Name = backend.name
+					// TODO: The tenant isolation
+					pool.Namespace = "default"
 					pool.UpstreamHashBy = backend.hashBy
 					l7Pools[backend.name] = pool
 				}
+				var notReadyAddress *corev1.EndpointAddress
+				var notReadyPort *corev1.EndpointPort
 				for _, ss := range ep.Subsets {
-					var addresses []corev1.EndpointAddress
-					if ss.Addresses != nil && len(ss.Addresses) > 0 {
-						addresses = append(addresses, ss.Addresses...)
-					} else {
-						addresses = append(addresses, ss.NotReadyAddresses...)
-					}
-					for _, address := range addresses {
-						if _, ok := l7PoolMap[epn]; ok { // l7
-							pool.Nodes = append(pool.Nodes, &v1.Node{
-								Host:   address.IP,
-								Port:   ss.Ports[0].Port,
-								Weight: backend.weight,
-							})
+					for i, port := range ss.Ports {
+						if (ss.Addresses == nil || len(ss.Addresses) == 0) && len(ss.NotReadyAddresses) > 0 {
+							notReadyAddress = &ss.NotReadyAddresses[0]
+							notReadyPort = &ss.Ports[i]
+						}
+						for _, address := range ss.Addresses {
+							if _, ok := l7PoolMap[epn]; ok { // l7
+								pool.Nodes = append(pool.Nodes, &v1.Node{
+									Host:   address.IP,
+									Port:   port.Port,
+									Weight: backend.weight,
+								})
+							}
 						}
 					}
+				}
+				// If you have an address, make sure you have at least one node, regardless of its health
+				if len(pool.Nodes) == 0 && notReadyAddress != nil && notReadyPort != nil {
+					pool.Nodes = append(pool.Nodes, &v1.Node{
+						Host:   notReadyAddress.IP,
+						Port:   notReadyPort.Port,
+						Weight: backend.weight,
+					})
 				}
 			}
 			// l4
@@ -420,23 +438,27 @@ func (s *k8sStore) ListPool() ([]*v1.Pool, []*v1.Pool) {
 					pool = &v1.Pool{
 						Nodes: []*v1.Node{},
 					}
+					// TODO: The tenant isolation
+					pool.Namespace = "default"
 					pool.Name = backend.name
 					l4Pools[backend.name] = pool
 				}
 				for _, ss := range ep.Subsets {
-					var addresses []corev1.EndpointAddress
-					if ss.Addresses != nil && len(ss.Addresses) > 0 {
-						addresses = append(addresses, ss.Addresses...)
-					} else {
-						addresses = append(addresses, ss.NotReadyAddresses...)
-					}
-					for _, address := range addresses {
-						if _, ok := l4PoolMap[epn]; ok { // l7
-							pool.Nodes = append(pool.Nodes, &v1.Node{
-								Host:   address.IP,
-								Port:   ss.Ports[0].Port,
-								Weight: backend.weight,
-							})
+					for _, port := range ss.Ports {
+						var addresses []corev1.EndpointAddress
+						if ss.Addresses != nil && len(ss.Addresses) > 0 {
+							addresses = append(addresses, ss.Addresses...)
+						} else if len(ss.NotReadyAddresses) > 0 {
+							addresses = append(addresses, ss.NotReadyAddresses[0])
+						}
+						for _, address := range addresses {
+							if _, ok := l4PoolMap[epn]; ok { // l7
+								pool.Nodes = append(pool.Nodes, &v1.Node{
+									Host:   address.IP,
+									Port:   port.Port,
+									Weight: backend.weight,
+								})
+							}
 						}
 					}
 				}
@@ -466,37 +488,60 @@ func (s *k8sStore) ListVirtualService() (l7vs []*v1.VirtualService, l4vs []*v1.V
 		if !s.ingressIsValid(ing) {
 			continue
 		}
-
 		ingKey := k8s.MetaNamespaceKey(ing)
 		anns, err := s.GetIngressAnnotations(ingKey)
 		if err != nil {
 			logrus.Errorf("Error getting Ingress annotations %q: %v", ingKey, err)
+			continue
 		}
 		if anns.L4.L4Enable && anns.L4.L4Port != 0 {
 			// region l4
 			host := strings.Replace(anns.L4.L4Host, " ", "", -1)
-			if host == "" {
-				host = s.conf.IP
+			if host == "" || host == "0.0.0.0" {
+				host = "0.0.0.0"
+			} else {
+				//Determines whether the current node is in effect
+				ip := net.ParseIP(host)
+				if ip == nil {
+					logrus.Warningf("ingress %s (Namespace:%s) l4 host config is invalid", ing.Name, ing.Namespace)
+					continue
+				}
+				if !s.node.IPManager().IPInCurrentHost(ip) {
+					logrus.Debugf("ingress %s (Namespace:%s) l4 host %s does not belong to the current node", ing.Name, ing.Namespace, host)
+					continue
+				}
 			}
-			host = s.conf.IP
 			svcKey := fmt.Sprintf("%v/%v", ing.Namespace, ing.Spec.Backend.ServiceName)
 			protocol := s.GetServiceProtocol(svcKey, ing.Spec.Backend.ServicePort.IntVal)
 			listening := fmt.Sprintf("%s:%v", host, anns.L4.L4Port)
 			if string(protocol) == string(v1.ProtocolUDP) {
 				listening = fmt.Sprintf("%s %s", listening, "udp")
 			}
-
-			backendName := util.BackendName(listening, ing.Namespace)
-			vs := l4vsMap[listening]
-			if vs == nil {
-				vs = &v1.VirtualService{
-					Listening: []string{listening},
-					PoolName:  backendName,
-				}
-				vs.Namespace = anns.Namespace
-				vs.ServiceID = anns.Labels["service_id"]
+			//Detect if the IP and port are in conflict
+			//This is based on the order of the judgment, if the conflict, the latter discarded
+			if anns.L4.L4Port == s.conf.ListenPorts.HTTP || anns.L4.L4Port == s.conf.ListenPorts.HTTPS ||
+				anns.L4.L4Port == s.conf.ListenPorts.Health || anns.L4.L4Port == s.conf.ListenPorts.Status {
+				logrus.Warningf("ingress %s (Namespace:%s) l4 host repeat listening will be ignored", ing.Name, ing.Namespace)
+				continue
 			}
-
+			conflictkey := []string{
+				listening, strings.Replace(listening, host, "0.0.0.0", 1),
+			}
+			for _, key := range conflictkey {
+				vs := l4vsMap[key]
+				if vs != nil {
+					logrus.Warningf("ingress %s (Namespace:%s) l4 host repeat listening will be ignored", ing.Name, ing.Namespace)
+					continue
+				}
+			}
+			backendName := util.BackendName(listening, ing.Namespace)
+			vs := &v1.VirtualService{
+				Listening: []string{listening},
+				PoolName:  backendName,
+				Protocol:  protocol,
+			}
+			vs.Namespace = anns.Namespace
+			vs.ServiceID = anns.Labels["service_id"]
 			l4PoolMap[ing.Spec.Backend.ServiceName] = struct{}{}
 			l4vsMap[listening] = vs
 			l4vs = append(l4vs, vs)
@@ -686,7 +731,7 @@ func (s *k8sStore) ingressIsValid(ing *extensions.Ingress) bool {
 		return false
 	}
 	if !exists {
-		logrus.Warningf("Endpoint \"%s\" does not exist.", endpointKey)
+		logrus.Debugf("Endpoint %s does not exist.", endpointKey)
 		return false
 	}
 	endpoint, ok := item.(*corev1.Endpoints)
@@ -695,12 +740,12 @@ func (s *k8sStore) ingressIsValid(ing *extensions.Ingress) bool {
 		return false
 	}
 	if endpoint.Subsets == nil || len(endpoint.Subsets) == 0 {
-		logrus.Warningf("Endpoints(%s) is empty, ignore it", endpointKey)
+		logrus.Debugf("Endpoints(%s) is empty, ignore it", endpointKey)
 		return false
 	}
 	for _, ep := range endpoint.Subsets {
 		if (ep.Addresses == nil || len(ep.Addresses) == 0) && (ep.NotReadyAddresses == nil || len(ep.NotReadyAddresses) == 0) {
-			logrus.Warningf("Endpoints(%s) is empty, ignore it", endpointKey)
+			logrus.Debugf("Endpoints(%s) is empty, ignore it", endpointKey)
 			return false
 		}
 	}
@@ -755,13 +800,13 @@ func (s k8sStore) GetIngressAnnotations(key string) (*annotations.Ingress, error
 func (s *k8sStore) Run(stopCh chan struct{}) {
 	// start informers
 	s.informers.Run(stopCh)
+	go s.loopUpdateIngress()
 }
 
 // syncSecrets synchronizes data from all Secrets referenced by the given
 // Ingress with the local store and file system.
 func (s *k8sStore) syncSecrets(ing *extensions.Ingress) {
 	key := k8s.MetaNamespaceKey(ing)
-	// 获取所有关联的secret key
 	for _, secrKey := range s.secretIngressMap.getSecretKeys(key) {
 		s.syncSecret(secrKey)
 	}
@@ -773,7 +818,6 @@ func (s *k8sStore) syncSecret(secrKey string) {
 		logrus.Errorf("fail to get certificate pem: %v", err)
 		return
 	}
-
 	old, exists := s.sslStore.Get(secrKey)
 	if exists {
 		oldSSLCert := old.(*v1.SSLCert)
@@ -814,9 +858,25 @@ func (s *k8sStore) getCertificatePem(secrKey string) (*v1.SSLCert, error) {
 	if e := ioutil.WriteFile(filename, buffer.Bytes(), 0666); e != nil {
 		return nil, fmt.Errorf("cant not write data to %s: %v", filename, e)
 	}
+	fileContent, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("read certificate file failed: %s", err.Error())
+	}
+	pemContent, _ := pem.Decode(fileContent)
+	if pemContent == nil {
+		return nil, fmt.Errorf("generate certificate object failed, pemContent is nil")
+	}
+	certificate, err := x509.ParseCertificate(pemContent.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("generate certificate object failed: %s", err.Error())
+	}
 
 	return &v1.SSLCert{
 		CertificatePem: filename,
+		Certificate:    certificate,
+		CertificateStr: string(certificate.Raw),
+		PrivateKey:     string(key),
+		CN:             []string{certificate.Subject.CommonName},
 	}, nil
 }
 
@@ -830,4 +890,33 @@ func (s *k8sStore) GetBackendConfiguration() config.Configuration {
 	defer s.backendConfigMu.RUnlock()
 
 	return s.backendConfig
+}
+
+func (s *k8sStore) loopUpdateIngress() {
+	for ipevent := range s.node.IPManager().NeedUpdateGatewayPolicy() {
+		ingress := s.listers.Ingress.List()
+		for i := range ingress {
+			curIng, ok := ingress[i].(*v1beta1.Ingress)
+			if ok && curIng != nil && s.annotations.Extract(curIng).L4.L4Host == ipevent.IP.String() {
+				s.extractAnnotations(curIng)
+				s.secretIngressMap.update(curIng)
+				s.syncSecrets(curIng)
+				s.updateCh.In() <- Event{
+					Type: func() EventType {
+						switch ipevent.Type {
+						case coreutil.ADD:
+							return CreateEvent
+						case coreutil.UPDATE:
+							return UpdateEvent
+						case coreutil.DEL:
+							return DeleteEvent
+						default:
+							return UpdateEvent
+						}
+					}(),
+					Obj: ingress[i],
+				}
+			}
+		}
+	}
 }

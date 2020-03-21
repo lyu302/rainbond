@@ -194,12 +194,10 @@ func NewSocketCollector(gatewayHost string, metricsPerHost bool) (*SocketCollect
 // SetHosts sets the hostnames that are being served by the ingress controller
 // This set of hostnames is used to filter the metrics to be exposed
 func (sc *SocketCollector) SetHosts(hosts sets.String) {
-	logrus.Debugf("set hosts %v", hosts.List())
 	sc.hosts = hosts
 }
 
 func (sc *SocketCollector) handleMessage(msg []byte) {
-	logrus.Debugf("msg: %v", string(msg))
 	// Unmarshal bytes
 	var statsBatch []socketData
 	err := jsoniter.ConfigCompatibleWithStandardLibrary.Unmarshal(msg, &statsBatch)
@@ -314,7 +312,7 @@ func (sc *SocketCollector) RemoveMetrics(hosts []string, registry prometheus.Gat
 		return
 	}
 	// 1. remove metrics of removed hosts
-	logrus.Infof("removing host %v from metrics", hosts)
+	logrus.Debugf("removing host %v from metrics", hosts)
 	for _, mf := range mfs {
 		metricName := mf.GetName()
 		metric, ok := sc.metricMapping[metricName]
@@ -338,14 +336,14 @@ func (sc *SocketCollector) RemoveMetrics(hosts []string, registry prometheus.Gat
 			if ok {
 				removed := h.Delete(labels)
 				if !removed {
-					logrus.Infof("metric %v for host %v with labels not removed: %v", metricName, ingKey, labels)
+					logrus.Debugf("metric %v for host %v with labels not removed: %v", metricName, ingKey, labels)
 				}
 			}
 			s, ok := metric.(*prometheus.SummaryVec)
 			if ok {
 				removed := s.Delete(labels)
 				if !removed {
-					logrus.Infof("metric %v for host %v with labels not removed: %v", metricName, ingKey, labels)
+					logrus.Debugf("metric %v for host %v with labels not removed: %v", metricName, ingKey, labels)
 				}
 			}
 		}

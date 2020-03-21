@@ -20,6 +20,7 @@ package store
 
 import (
 	"sync"
+	"time"
 
 	"github.com/goodrain/rainbond/eventlog/db"
 
@@ -32,6 +33,7 @@ import (
 type MessageStore interface {
 	InsertMessage(*db.EventLogMessage)
 	InsertGarbageMessage(...*db.EventLogMessage)
+	GetHistoryMessage(eventID string, length int) []string
 	SubChan(eventID, subID string) chan *db.EventLogMessage
 	RealseSubChan(eventID, subID string)
 	GetMonitorData() *db.MonitorData
@@ -97,24 +99,6 @@ func NewStore(storeType string, manager *storeManager) MessageStore {
 		}
 		return read
 	}
-	if storeType == "monitor" {
-		monitor := &monitorMessageStore{
-			barrels: make(map[string]*monitorMessageBarrel, 100),
-			conf:    manager.conf,
-			log:     manager.log.WithField("module", "MonitorMessageStore"),
-			ctx:     ctx,
-			cancel:  cancel,
-		}
-		monitor.pool = &sync.Pool{
-			New: func() interface{} {
-				reb := &monitorMessageBarrel{
-					subSocketChan: make(map[string]chan *db.EventLogMessage, 0),
-				}
-				return reb
-			},
-		}
-		return monitor
-	}
 	if storeType == "docker_log" {
 		docker := &dockerLogStore{
 			barrels:    make(map[string]*dockerLogEventBarrel, 100),
@@ -131,9 +115,10 @@ func NewStore(storeType string, manager *storeManager) MessageStore {
 		docker.pool = &sync.Pool{
 			New: func() interface{} {
 				reb := &dockerLogEventBarrel{
-					subSocketChan: make(map[string]chan *db.EventLogMessage, 0),
-					cacheSize:     manager.conf.PeerDockerMaxCacheLogNumber,
-					barrelEvent:   docker.barrelEvent,
+					subSocketChan:   make(map[string]chan *db.EventLogMessage, 0),
+					cacheSize:       manager.conf.PeerDockerMaxCacheLogNumber,
+					barrelEvent:     docker.barrelEvent,
+					persistenceTime: time.Now(),
 				}
 				return reb
 			},

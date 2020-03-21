@@ -128,7 +128,7 @@ func (c *ContainerLogManage) handleLogger() {
 						retry := 0
 						for retry < maxJSONDecodeRetry {
 							retry++
-							reader, err := NewLogFile(cevent.Container.LogPath, 3, false, decodeFunc, 0640, getTailReader)
+							reader, err := NewLogFile(cevent.Container.LogPath, 2, false, decodeFunc, 0640, getTailReader)
 							if err != nil {
 								logrus.Errorf("create logger failure %s", err.Error())
 								time.Sleep(time.Second * 1)
@@ -207,6 +207,9 @@ func (c *ContainerLogManage) loollist() {
 		case <-ticker.C:
 			for _, container := range c.listContainer() {
 				cj, _ := c.getContainer(container.ID)
+				if cj.ContainerJSONBase == nil || cj.HostConfig == nil || cj.HostConfig.LogConfig.Type == "" {
+					continue
+				}
 				loggerType := cj.HostConfig.LogConfig.Type
 				if loggerType != "json-file" && loggerType != "syslog" {
 					continue
@@ -227,7 +230,8 @@ func (c *ContainerLogManage) listAndWatchContainer(errchan chan error) {
 			if !strings.Contains(err.Error(), "No such container") {
 				logrus.Errorf("get container detail info failure %s", err.Error())
 			}
-			container.ID = con.ID
+			// The log path cannot be obtained if the container details cannot be obtained
+			continue
 		}
 		c.cacheContainer(ContainerEvent{Action: "start", Container: container})
 	}
@@ -367,7 +371,8 @@ func (container *ContainerLog) startLogger() ([]Logger, error) {
 	configs := getLoggerConfig(container.Config.Env)
 	var loggers []Logger
 	for _, config := range configs {
-		initDriver, err := GetLogDriver(config.Name)
+		initDriver, err := 
+			GetLogDriver(config.Name)
 		if err != nil {
 			logrus.Warnf("get container log driver failure %s", err.Error())
 			continue

@@ -27,35 +27,61 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/goodrain/rainbond/gateway/cluster"
-
+	"github.com/Sirupsen/logrus"
 	"github.com/go-chi/chi"
-
-	"github.com/goodrain/rainbond/util"
-
-	"github.com/goodrain/rainbond/discover"
-
-	"github.com/goodrain/rainbond/gateway/metric"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/goodrain/rainbond/cmd/gateway/option"
-	"github.com/goodrain/rainbond/gateway/controller"
 	"k8s.io/apiserver/pkg/server/healthz"
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/goodrain/rainbond/cmd/gateway/option"
+	"github.com/goodrain/rainbond/discover"
+	"github.com/goodrain/rainbond/gateway/cluster"
+	"github.com/goodrain/rainbond/gateway/controller"
+	"github.com/goodrain/rainbond/gateway/metric"
+	"github.com/goodrain/rainbond/util"
+
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
+	k8sutil "github.com/goodrain/rainbond/util/k8s"
 )
 
 //Run start run
 func Run(s *option.GWServer) error {
 	logrus.Info("start gateway...")
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	config, err := k8sutil.NewRestConfig(s.K8SConfPath)
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints:   s.Config.EtcdEndpoint,
+		CaFile:      s.Config.EtcdCaFile,
+		CertFile:    s.Config.EtcdCertFile,
+		KeyFile:     s.Config.EtcdKeyFile,
+		DialTimeout: time.Duration(s.Config.EtcdTimeout) * time.Second,
+	}
+	etcdCli, err := etcdutil.NewClient(ctx, etcdClientArgs)
+	if err != nil {
+		return err
+	}
+
 	//create cluster node manage
-	_, err := cluster.CreateNodeManager(s.Config)
+	logrus.Debug("start creating node manager")
+	node, err := cluster.CreateNodeManager(ctx, s.Config, etcdCli)
 	if err != nil {
 		return fmt.Errorf("create gateway node manage failure %s", err.Error())
 	}
+	defer node.Stop()
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(prometheus.NewGoCollector())
 	reg.MustRegister(prometheus.NewProcessCollector(os.Getpid(), "gateway"))
@@ -67,13 +93,15 @@ func Run(s *option.GWServer) error {
 		}
 	}
 	mc.Start()
-	gwc, err := controller.NewGWController(ctx, &s.Config, mc)
+
+	gwc, err := controller.NewGWController(ctx, clientset, &s.Config, mc, node)
 	if err != nil {
 		return err
 	}
 	if gwc == nil {
 		return fmt.Errorf("Fail to new GWController")
 	}
+	logrus.Debug("start gateway controller")
 	if err := gwc.Start(errCh); err != nil {
 		return fmt.Errorf("Fail to start GWController %s", err.Error())
 	}
@@ -87,11 +115,12 @@ func Run(s *option.GWServer) error {
 	}
 	go startHTTPServer(s.ListenPorts.Health, mux)
 
-	keepalive, err := discover.CreateKeepAlive(s.Config.EtcdEndpoint, "gateway", s.Config.NodeName,
+	keepalive, err := discover.CreateKeepAlive(etcdClientArgs, "gateway", s.Config.NodeName,
 		s.Config.HostIP, s.ListenPorts.Health)
 	if err != nil {
 		return err
 	}
+	logrus.Debug("start keepalive")
 	if err := keepalive.Start(); err != nil {
 		return err
 	}
@@ -100,7 +129,7 @@ func Run(s *option.GWServer) error {
 	logrus.Info("RBD app gateway start success!")
 
 	term := make(chan os.Signal)
-	signal.Notify(term, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(term, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	select {
 	case <-term:
 		logrus.Warn("Received SIGTERM, exiting gracefully...")

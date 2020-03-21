@@ -22,22 +22,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
-	"github.com/goodrain/rainbond/builder"
-
 	"github.com/Sirupsen/logrus"
+	"github.com/jinzhu/gorm"
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	api_model "github.com/goodrain/rainbond/api/model"
+	"github.com/goodrain/rainbond/builder"
 	"github.com/goodrain/rainbond/db"
 	"github.com/goodrain/rainbond/db/model"
 	"github.com/goodrain/rainbond/util"
 	typesv1 "github.com/goodrain/rainbond/worker/appm/types/v1"
-	"github.com/jinzhu/gorm"
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 //TenantServicePlugin conv service all plugin
@@ -128,9 +127,11 @@ func conversionServicePlugin(as *typesv1.AppService, dbmanager db.Manager) ([]v1
 		if err != nil && err != gorm.ErrRecordNotFound {
 			logrus.Errorf("get service plugin config from db failure %s", err.Error())
 		}
-		var resourceConfig api_model.ResourceSpec
-		if err := json.Unmarshal([]byte(config.ConfigStr), &resourceConfig); err == nil {
-			inboundPluginConfig = &resourceConfig
+		if config != nil {
+			var resourceConfig api_model.ResourceSpec
+			if err := json.Unmarshal([]byte(config.ConfigStr), &resourceConfig); err == nil {
+				inboundPluginConfig = &resourceConfig
+			}
 		}
 	}
 	//create plugin config to configmap
@@ -142,7 +143,7 @@ func conversionServicePlugin(as *typesv1.AppService, dbmanager db.Manager) ([]v1
 	if as.NeedProxy && !netPlugin {
 		depUDPPort, _ := dbmanager.TenantServicesPortDao().GetDepUDPPort(as.ServiceID)
 		if len(depUDPPort) > 0 {
-			c2 := createUDPDefaultPluginContainer(as.ServiceID, mainContainer.Env)
+			c2 := createUDPDefaultPluginContainer(as, mainContainer.Env)
 			containers = append(containers, c2)
 			udpDep = true
 		} else {
@@ -150,20 +151,21 @@ func conversionServicePlugin(as *typesv1.AppService, dbmanager db.Manager) ([]v1
 			if err != nil {
 				logrus.Errorf("apply default mesh plugin config failure %s", err.Error())
 			}
-			c2 := createTCPDefaultPluginContainer(as.ServiceID, pluginID, mainContainer.Env)
+			c2 := createTCPDefaultPluginContainer(as, pluginID, mainContainer.Env)
 			containers = append(containers, c2)
 			meshPluginID = pluginID
 		}
 	}
-	if as.NeedProxy && !udpDep && strings.ToLower(as.ExtensionSet["startup_sequence"]) == "true" {
-		initContainers = append(initContainers, createProbeMeshInitContainer(as.ServiceID, meshPluginID, as.ServiceAlias, mainContainer.Env))
+
+	if bootSeqDepServiceIds := as.ExtensionSet["boot_seq_dep_service_ids"]; as.NeedProxy && !udpDep && bootSeqDepServiceIds != "" {
+		initContainers = append(initContainers, createProbeMeshInitContainer(as, meshPluginID, as.ServiceAlias, mainContainer.Env))
 	}
 	return initContainers, containers, nil
 }
 
-func createUDPDefaultPluginContainer(serviceID string, envs []v1.EnvVar) v1.Container {
+func createUDPDefaultPluginContainer(as *typesv1.AppService, envs []v1.EnvVar) v1.Container {
 	return v1.Container{
-		Name: "default-udpmesh-" + serviceID[len(serviceID)-20:],
+		Name: "default-udpmesh-" + as.ServiceID[len(as.ServiceID)-20:],
 		VolumeMounts: []v1.VolumeMount{v1.VolumeMount{
 			MountPath: "/etc/kubernetes",
 			Name:      "kube-config",
@@ -172,11 +174,11 @@ func createUDPDefaultPluginContainer(serviceID string, envs []v1.EnvVar) v1.Cont
 		Env:                    envs,
 		TerminationMessagePath: "",
 		Image:                  builder.REGISTRYDOMAIN + "/adapter",
-		Resources:              createAdapterResources(128, 500),
+		Resources:              createTCPUDPMeshRecources(as),
 	}
 }
 
-func createTCPDefaultPluginContainer(serviceID, pluginID string, envs []v1.EnvVar) v1.Container {
+func createTCPDefaultPluginContainer(as *typesv1.AppService, pluginID string, envs []v1.EnvVar) v1.Container {
 	envs = append(envs, v1.EnvVar{Name: "PLUGIN_ID", Value: pluginID})
 	_, xdsHostPort, apiHostPort := getXDSHostIPAndPort()
 	envs = append(envs, v1.EnvVar{Name: "XDS_HOST_IP", ValueFrom: &corev1.EnvVarSource{
@@ -186,15 +188,16 @@ func createTCPDefaultPluginContainer(serviceID, pluginID string, envs []v1.EnvVa
 	}})
 	envs = append(envs, v1.EnvVar{Name: "API_HOST_PORT", Value: apiHostPort})
 	envs = append(envs, v1.EnvVar{Name: "XDS_HOST_PORT", Value: xdsHostPort})
+
 	return v1.Container{
-		Name:      "default-tcpmesh-" + serviceID[len(serviceID)-20:],
+		Name:      "default-tcpmesh-" + as.ServiceID[len(as.ServiceID)-20:],
 		Env:       envs,
 		Image:     typesv1.GetTCPMeshImageName(),
-		Resources: createAdapterResources(128, 500),
+		Resources: createTCPUDPMeshRecources(as),
 	}
 }
 
-func createProbeMeshInitContainer(serviceID, pluginID, serviceAlias string, envs []v1.EnvVar) v1.Container {
+func createProbeMeshInitContainer(as *typesv1.AppService, pluginID, serviceAlias string, envs []v1.EnvVar) v1.Container {
 	envs = append(envs, v1.EnvVar{Name: "PLUGIN_ID", Value: pluginID})
 	_, xdsHostPort, apiHostPort := getXDSHostIPAndPort()
 	envs = append(envs, v1.EnvVar{Name: "XDS_HOST_IP", ValueFrom: &corev1.EnvVarSource{
@@ -205,10 +208,10 @@ func createProbeMeshInitContainer(serviceID, pluginID, serviceAlias string, envs
 	envs = append(envs, v1.EnvVar{Name: "API_HOST_PORT", Value: apiHostPort})
 	envs = append(envs, v1.EnvVar{Name: "XDS_HOST_PORT", Value: xdsHostPort})
 	return v1.Container{
-		Name:      "probe-mesh-" + serviceID[len(serviceID)-20:],
+		Name:      "probe-mesh-" + as.ServiceID[len(as.ServiceID)-20:],
 		Env:       envs,
 		Image:     typesv1.GetProbeMeshImageName(),
-		Resources: createAdapterResources(128, 500),
+		Resources: createTCPUDPMeshRecources(as),
 	}
 }
 
@@ -272,15 +275,17 @@ func applyDefaultMeshPluginConfig(as *typesv1.AppService, dbmanager db.Manager) 
 			logrus.Errorf("get service depend service info failure %s", err.Error())
 		}
 		for _, port := range ports {
-			depService := &api_model.BaseService{
-				ServiceAlias:       as.ServiceAlias,
-				ServiceID:          as.ServiceID,
-				DependServiceAlias: depService.ServiceAlias,
-				DependServiceID:    depService.ServiceID,
-				Port:               port.ContainerPort,
-				Protocol:           "tcp",
+			if *port.IsInnerService {
+				depService := &api_model.BaseService{
+					ServiceAlias:       as.ServiceAlias,
+					ServiceID:          as.ServiceID,
+					DependServiceAlias: depService.ServiceAlias,
+					DependServiceID:    depService.ServiceID,
+					Port:               port.ContainerPort,
+					Protocol:           "tcp",
+				}
+				baseServices = append(baseServices, depService)
 			}
-			baseServices = append(baseServices, depService)
 		}
 	}
 	var res = &api_model.ResourceSpec{
@@ -402,45 +407,30 @@ func pluginWeight(pluginModel string) int {
 		return 0
 	}
 }
+
 func createPluginResources(memory int, cpu int) v1.ResourceRequirements {
-	limits := v1.ResourceList{}
-	// limits[v1.ResourceCPU] = *resource.NewMilliQuantity(
-	// 	int64(cpu*3),
-	// 	resource.DecimalSI)
-	limits[v1.ResourceMemory] = *resource.NewQuantity(
-		int64(memory*1024*1024),
-		resource.BinarySI)
-	request := v1.ResourceList{}
-	// request[v1.ResourceCPU] = *resource.NewMilliQuantity(
-	// 	int64(cpu*2),
-	// 	resource.DecimalSI)
-	request[v1.ResourceMemory] = *resource.NewQuantity(
-		int64(memory*1024*1024),
-		resource.BinarySI)
-	return v1.ResourceRequirements{
-		Limits:   limits,
-		Requests: request,
-	}
+	return createResourcesByDefaultCPU(memory, int64(cpu), int64(cpu))
 }
 
-//createAdapterResources current no limit
-func createAdapterResources(memory int, cpu int) v1.ResourceRequirements {
-	limits := v1.ResourceList{}
-	// limits[v1.ResourceCPU] = *resource.NewMilliQuantity(
-	// 	int64(cpu*3),
-	// 	resource.DecimalSI)
-	//limits[v1.ResourceMemory] = *resource.NewQuantity(
-	//	int64(memory*1024*1024),
-	//	resource.BinarySI)
-	request := v1.ResourceList{}
-	// request[v1.ResourceCPU] = *resource.NewMilliQuantity(
-	// 	int64(cpu*2),
-	// 	resource.DecimalSI)
-	//request[v1.ResourceMemory] = *resource.NewQuantity(
-	//	int64(memory*1024*1024),
-	//	resource.BinarySI)
-	return v1.ResourceRequirements{
-		Limits:   limits,
-		Requests: request,
+func createTCPUDPMeshRecources(as *typesv1.AppService) v1.ResourceRequirements {
+	var memory = 128
+	var cpu int64
+	if limit, ok := as.ExtensionSet["tcpudp_mesh_cpu"]; ok {
+		limitint, _ := strconv.Atoi(limit)
+		if limitint > 0 {
+			cpu = int64(limitint)
+		}
 	}
+	if request, ok := as.ExtensionSet["tcpudp_mesh_memory"]; ok {
+		requestint, _ := strconv.Atoi(request)
+		if requestint > 0 {
+			memory = requestint
+		}
+	}
+	return createResourcesByDefaultCPU(memory, cpu, func() int64 {
+		if cpu < 120 {
+			return 120
+		}
+		return cpu
+	}())
 }

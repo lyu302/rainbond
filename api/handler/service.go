@@ -20,6 +20,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,23 +30,33 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/clientv3"
-	api_model "github.com/goodrain/rainbond/api/model"
-	"github.com/goodrain/rainbond/api/proxy"
-	"github.com/goodrain/rainbond/api/util"
-	"github.com/goodrain/rainbond/cmd/api/option"
-	"github.com/goodrain/rainbond/db"
-	core_model "github.com/goodrain/rainbond/db/model"
-	dbmodel "github.com/goodrain/rainbond/db/model"
-	"github.com/goodrain/rainbond/event"
-	gclient "github.com/goodrain/rainbond/mq/client"
-	core_util "github.com/goodrain/rainbond/util"
-	"github.com/goodrain/rainbond/worker/client"
-	"github.com/goodrain/rainbond/worker/discover/model"
-	"github.com/goodrain/rainbond/worker/server/pb"
 	"github.com/jinzhu/gorm"
 	"github.com/pquerna/ffjson/ffjson"
 	"github.com/twinj/uuid"
+
+	"github.com/goodrain/rainbond/api/proxy"
+	"github.com/goodrain/rainbond/api/util"
+	"github.com/goodrain/rainbond/builder/parser"
+	"github.com/goodrain/rainbond/cmd/api/option"
+	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/event"
+	"github.com/goodrain/rainbond/worker/client"
+	"github.com/goodrain/rainbond/worker/discover/model"
+	"github.com/goodrain/rainbond/worker/server"
+	"github.com/goodrain/rainbond/worker/server/pb"
+
+	api_model "github.com/goodrain/rainbond/api/model"
+	dberrors "github.com/goodrain/rainbond/db/errors"
+	core_model "github.com/goodrain/rainbond/db/model"
+	dbmodel "github.com/goodrain/rainbond/db/model"
+	eventutil "github.com/goodrain/rainbond/eventlog/util"
+	gclient "github.com/goodrain/rainbond/mq/client"
+	core_util "github.com/goodrain/rainbond/util"
+	typesv1 "github.com/goodrain/rainbond/worker/appm/types/v1"
 )
+
+// ErrServiceNotClosed -
+var ErrServiceNotClosed = errors.New("Service has not been closed")
 
 //ServiceAction service act
 type ServiceAction struct {
@@ -241,17 +252,12 @@ func (s *ServiceAction) AddLabel(l *api_model.LabelsStruct, serviceID string) er
 			tx.Rollback()
 		}
 	}()
+	//V5.2: do not support service type label
 	for _, label := range l.Labels {
-		var labelModel dbmodel.TenantServiceLable
-		switch label.LabelKey {
-		case core_model.LabelKeyServiceType:
-			labelModel.ServiceID = serviceID
-			labelModel.LabelKey = core_model.LabelKeyServiceType
-			labelModel.LabelValue = chekeServiceLabel(label.LabelValue)
-		default:
-			labelModel.ServiceID = serviceID
-			labelModel.LabelKey = label.LabelKey
-			labelModel.LabelValue = label.LabelValue
+		labelModel := dbmodel.TenantServiceLable{
+			ServiceID:  serviceID,
+			LabelKey:   label.LabelKey,
+			LabelValue: label.LabelValue,
 		}
 		if err := db.GetManager().TenantServiceLabelDaoTransactions(tx).AddModel(&labelModel); err != nil {
 			tx.Rollback()
@@ -283,17 +289,12 @@ func (s *ServiceAction) UpdateLabel(l *api_model.LabelsStruct, serviceID string)
 			tx.Rollback()
 			return err
 		}
+		// V5.2 do not support service type label
 		// add new labels
-		var labelModel dbmodel.TenantServiceLable
-		switch label.LabelKey {
-		case core_model.LabelKeyServiceType:
-			labelModel.ServiceID = serviceID
-			labelModel.LabelKey = core_model.LabelKeyServiceType
-			labelModel.LabelValue = chekeServiceLabel(label.LabelValue)
-		default:
-			labelModel.ServiceID = serviceID
-			labelModel.LabelKey = label.LabelKey
-			labelModel.LabelValue = label.LabelValue
+		labelModel := dbmodel.TenantServiceLable{
+			ServiceID:  serviceID,
+			LabelKey:   label.LabelKey,
+			LabelValue: label.LabelValue,
 		}
 		if err := db.GetManager().TenantServiceLabelDaoTransactions(tx).AddModel(&labelModel); err != nil {
 			logrus.Errorf("error adding new labels: %v", err)
@@ -332,24 +333,6 @@ func (s *ServiceAction) DeleteLabel(l *api_model.LabelsStruct, serviceID string)
 		return err
 	}
 	return nil
-}
-
-//UpdateServiceLabel UpdateLabel
-func (s *ServiceAction) UpdateServiceLabel(serviceID, value string) error {
-	sls, err := db.GetManager().TenantServiceLabelDao().GetTenantServiceLabel(serviceID)
-	if err != nil {
-		return err
-	}
-	if len(sls) > 0 {
-		for _, sl := range sls {
-			sl.ServiceID = serviceID
-			sl.LabelKey = core_model.LabelKeyServiceType
-			value = chekeServiceLabel(value)
-			sl.LabelValue = value
-			return db.GetManager().TenantServiceLabelDao().UpdateModel(sl)
-		}
-	}
-	return fmt.Errorf("Get tenant service label error")
 }
 
 //StartStopService start service
@@ -512,9 +495,17 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 			env.ServiceID = ts.ServiceID
 			env.TenantID = ts.TenantID
 			if err := db.GetManager().TenantServiceEnvVarDaoTransactions(tx).AddModel(&env); err != nil {
-				logrus.Errorf("add env %v error, %v", env.AttrName, err)
-				tx.Rollback()
-				return err
+				logrus.Errorf("add env[name=%s] error, %v", env.AttrName, err)
+				if err != dberrors.ErrRecordAlreadyExist {
+					tx.Rollback()
+					return err
+				}
+				logrus.Warningf("recover env[name=%s]", env.AttrName)
+				// if env already exists, update it
+				if err = db.GetManager().TenantServiceEnvVarDaoTransactions(tx).UpdateModel(&env); err != nil {
+					tx.Rollback()
+					return err
+				}
 			}
 		}
 	}
@@ -563,11 +554,18 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 					v.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", sharePath, sc.TenantID, ts.ServiceID, volumn.VolumePath)
 				//本地文件存储
 				case dbmodel.LocalVolumeType.String():
-					if sc.ExtendMethod != "state" {
+					if !dbmodel.ServiceType(sc.ExtendMethod).IsState() {
 						tx.Rollback()
-						return util.CreateAPIHandleError(400, fmt.Errorf("应用类型不为有状态应用.不支持本地存储"))
+						return util.CreateAPIHandleError(400, fmt.Errorf("local volume type only support state component"))
 					}
 					v.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", localPath, sc.TenantID, ts.ServiceID, volumn.VolumePath)
+				case dbmodel.ConfigFileVolumeType.String(), dbmodel.MemoryFSVolumeType.String():
+					logrus.Debug("simple volume type : ", volumn.VolumeType)
+				default:
+					if !dbmodel.ServiceType(sc.ExtendMethod).IsState() {
+						tx.Rollback()
+						return util.CreateAPIHandleError(400, fmt.Errorf("custom volume type only support state component"))
+					}
 				}
 			}
 			if volumn.VolumeName == "" {
@@ -601,6 +599,7 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 				tx.Rollback()
 				return fmt.Errorf("find volume %s error %s", depVolume.VolumeName, err.Error())
 			}
+			depVolume.VolumeType = volume.VolumeType
 			depVolume.HostPath = volume.HostPath
 			if err := db.GetManager().TenantServiceMountRelationDaoTransactions(tx).AddModel(&depVolume); err != nil {
 				tx.Rollback()
@@ -619,14 +618,16 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 		}
 	}
 	//set app label
-	if err := db.GetManager().TenantServiceLabelDaoTransactions(tx).AddModel(&dbmodel.TenantServiceLable{
-		ServiceID:  ts.ServiceID,
-		LabelKey:   core_model.LabelKeyServiceType,
-		LabelValue: sc.ServiceLabel,
-	}); err != nil {
-		logrus.Errorf("add label %v error, %v", ts.ServiceID, err)
-		tx.Rollback()
-		return err
+	if sc.OSType == "windows" {
+		if err := db.GetManager().TenantServiceLabelDaoTransactions(tx).AddModel(&dbmodel.TenantServiceLable{
+			ServiceID:  ts.ServiceID,
+			LabelKey:   core_model.LabelKeyNodeSelector,
+			LabelValue: sc.OSType,
+		}); err != nil {
+			logrus.Errorf("add label %s=%s  %v error, %v", core_model.LabelKeyNodeSelector, sc.OSType, ts.ServiceID, err)
+			tx.Rollback()
+			return err
+		}
 	}
 	// sc.Endpoints can't be nil
 	// sc.Endpoints.Discovery or sc.Endpoints.Static can't be nil
@@ -669,17 +670,27 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 					UUID:      core_util.NewUUID(),
 					IsOnline:  &trueValue,
 				}
-				s := strings.Split(o, ":")
-				ep.IP = s[0]
-				if len(s) == 2 {
-					port, err := strconv.Atoi(s[1])
-					if err != nil {
-						logrus.Warningf("string:%s, error parsing string to int", s[1])
-						continue
-					} else {
-						ep.Port = port
-					}
+				address := o
+				port := 0
+				prefix := ""
+				if strings.HasPrefix(address, "https://") {
+					address = strings.Split(address, "https://")[1]
+					prefix = "https://"
 				}
+				if strings.HasPrefix(address, "http://") {
+					address = strings.Split(address, "http://")[1]
+					prefix = "http://"
+				}
+				if strings.Contains(address, ":") {
+					addressL := strings.Split(address, ":")
+					address = addressL[0]
+					port, _ = strconv.Atoi(addressL[1])
+				}
+				ep.IP = prefix + address
+				ep.Port = port
+
+				logrus.Debugf("add new endpoint: %v", ep)
+
 				if err := db.GetManager().EndpointsDaoTransactions(tx).AddModel(ep); err != nil {
 					tx.Rollback()
 					logrus.Errorf("error saving o endpoint: %v", err)
@@ -713,15 +724,46 @@ func (s *ServiceAction) ServiceUpdate(sc map[string]interface{}) error {
 	if sc["service_name"] != nil {
 		ts.ServiceName = sc["service_name"].(string)
 	}
+	if sc["extend_method"] != nil {
+		extendMethod := sc["extend_method"].(string)
+		ts.ExtendMethod = extendMethod
+		// if component replicas is more than 1, so can't change service type to singleton
+		if ts.Replicas > 1 && ts.IsSingleton() {
+			err := fmt.Errorf("service[%s] replicas > 1, can't change service typ to stateless_singleton", ts.ServiceAlias)
+			return err
+		}
+		volumes, err := db.GetManager().TenantServiceVolumeDao().GetTenantServiceVolumesByServiceID(ts.ServiceID)
+		if err != nil {
+			return err
+		}
+		for _, vo := range volumes {
+			if vo.VolumeType == dbmodel.ShareFileVolumeType.String() || vo.VolumeType == dbmodel.MemoryFSVolumeType.String() {
+				continue
+			}
+			if vo.VolumeType == dbmodel.LocalVolumeType.String() && !ts.IsState() {
+				err := fmt.Errorf("service[%s] has local volume type, can't change type to stateless", ts.ServiceAlias)
+				return err
+			}
+			// if component use volume, what it accessMode is rwo, can't change volume type to stateless
+			if vo.AccessMode == "RWO" && !ts.IsState() {
+				err := fmt.Errorf("service[%s] volume[%s] access_mode is RWO, can't change type to stateless", ts.ServiceAlias, vo.VolumeName)
+				return err
+			}
+		}
+		ts.ExtendMethod = extendMethod
+		ts.ServiceType = extendMethod
+	}
 	//update service
 	if err := db.GetManager().TenantServiceDao().UpdateModel(ts); err != nil {
 		logrus.Errorf("update service error, %v", err)
 		return err
 	}
 	//update service version
-	if err := db.GetManager().VersionInfoDao().UpdateModel(version); err != nil {
-		logrus.Errorf("update version error, %v", err)
-		return err
+	if version != nil {
+		if err := db.GetManager().VersionInfoDao().UpdateModel(version); err != nil {
+			logrus.Errorf("update version error, %v", err)
+			return err
+		}
 	}
 	return nil
 }
@@ -968,12 +1010,12 @@ func (s *ServiceAction) PortVar(action, tenantID, serviceID string, vps *api_mod
 		}
 	case "delete":
 		tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+				tx.Rollback()
+			}
+		}()
 		for _, vp := range vps.Port {
 			if err := db.GetManager().TenantServicesPortDaoTransactions(tx).DeleteModel(serviceID, vp.ContainerPort); err != nil {
 				logrus.Errorf("delete port var error, %v", err)
@@ -988,12 +1030,12 @@ func (s *ServiceAction) PortVar(action, tenantID, serviceID string, vps *api_mod
 		}
 	case "update":
 		tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+				tx.Rollback()
+			}
+		}()
 		for _, vp := range vps.Port {
 			//port更新单个请求
 			if oldPort == 0 {
@@ -1078,12 +1120,12 @@ func (s *ServiceAction) PortOuter(tenantName, serviceID string, containerPort in
 			falsev := false
 			p.IsOuterService = &falsev
 			tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+			defer func() {
+				if r := recover(); r != nil {
+					logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+					tx.Rollback()
+				}
+			}()
 			if err = db.GetManager().TenantServicesPortDaoTransactions(tx).UpdateModel(p); err != nil {
 				tx.Rollback()
 				return nil, "", err
@@ -1128,34 +1170,18 @@ func (s *ServiceAction) PortOuter(tenantName, serviceID string, containerPort in
 		}
 
 	case "open":
-		if *p.IsOuterService {
-			if p.Protocol != "http" && p.Protocol != "https" && servicePort.Body.IfCreateExPort {
-				vsPort, err = s.createVSPort(serviceID, p.ContainerPort)
-				if vsPort == nil {
-					return nil, "", fmt.Errorf("port already open but can not get lb mapping port,%s", err.Error())
-				}
-				return vsPort, p.Protocol, nil
-			}
-		}
 		truev := true
 		p.IsOuterService = &truev
 		tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+				tx.Rollback()
+			}
+		}()
 		if err = db.GetManager().TenantServicesPortDaoTransactions(tx).UpdateModel(p); err != nil {
 			tx.Rollback()
 			return nil, "", err
-		}
-		if p.Protocol != "http" && p.Protocol != "https" && servicePort.Body.IfCreateExPort {
-			vsPort, err = s.createVSPort(serviceID, p.ContainerPort)
-			if vsPort == nil {
-				tx.Rollback()
-				return nil, "", fmt.Errorf("create or get vs map port for service error,%s", err.Error())
-			}
 		}
 		if hasUpStream {
 			pluginPort, err := db.GetManager().TenantServicesStreamPluginPortDao().GetPluginMappingPortByServiceIDAndContainerPort(
@@ -1193,13 +1219,6 @@ func (s *ServiceAction) PortOuter(tenantName, serviceID string, containerPort in
 		}
 	}
 	return vsPort, p.Protocol, nil
-}
-func (s *ServiceAction) createVSPort(serviceID string, containerPort int) (*dbmodel.TenantServiceLBMappingPort, error) {
-	vsPort, err := db.GetManager().TenantServiceLBMappingPortDao().CreateTenantServiceLBMappingPort(serviceID, containerPort)
-	if err != nil {
-		return nil, fmt.Errorf("create vs map port for service error,%s", err.Error())
-	}
-	return vsPort, nil
 }
 
 //PortInner 端口对内服务操作
@@ -1318,48 +1337,6 @@ func (s *ServiceAction) PortInner(tenantName, serviceID, operation string, port 
 	return nil
 }
 
-//ChangeLBPort change lb mapping port
-//only support change to existing port in this tenants
-func (s *ServiceAction) ChangeLBPort(tenantID, serviceID string, containerPort, changelbPort int) (*dbmodel.TenantServiceLBMappingPort, *util.APIHandleError) {
-	oldmapport, err := db.GetManager().TenantServiceLBMappingPortDao().GetLBPortByTenantAndPort(tenantID, changelbPort)
-	if err != nil {
-		logrus.Errorf("change lb port check error, %s", err.Error())
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	mapport, err := db.GetManager().TenantServiceLBMappingPortDao().GetTenantServiceLBMappingPort(serviceID, containerPort)
-	if err != nil {
-		logrus.Errorf("change lb port get error, %s", err.Error())
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	port := oldmapport.Port
-	oldmapport.Port = mapport.Port
-	mapport.Port = port
-	tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
-	if err := db.GetManager().TenantServiceLBMappingPortDaoTransactions(tx).DELServiceLBMappingPortByServiceIDAndPort(oldmapport.ServiceID, port); err != nil {
-		tx.Rollback()
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	if err := db.GetManager().TenantServiceLBMappingPortDaoTransactions(tx).UpdateModel(mapport); err != nil {
-		tx.Rollback()
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	if err := db.GetManager().TenantServiceLBMappingPortDaoTransactions(tx).AddModel(oldmapport); err != nil {
-		tx.Rollback()
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		return nil, util.CreateAPIHandleErrorFromDBError("change lb port", err)
-	}
-	return mapport, nil
-}
-
 //VolumnVar var volumn
 func (s *ServiceAction) VolumnVar(tsv *dbmodel.TenantServiceVolume, tenantID, fileContent, action string) *util.APIHandleError {
 	localPath := os.Getenv("LOCAL_DATA_PATH")
@@ -1379,29 +1356,28 @@ func (s *ServiceAction) VolumnVar(tsv *dbmodel.TenantServiceVolume, tenantID, fi
 			//共享文件存储
 			case dbmodel.ShareFileVolumeType.String():
 				tsv.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", sharePath, tenantID, tsv.ServiceID, tsv.VolumePath)
-				//本地文件存储
+			//本地文件存储
 			case dbmodel.LocalVolumeType.String():
-				serviceType, err := db.GetManager().TenantServiceLabelDao().GetTenantServiceTypeLabel(tsv.ServiceID)
+				serviceInfo, err := db.GetManager().TenantServiceDao().GetServiceTypeById(tsv.ServiceID)
 				if err != nil {
 					return util.CreateAPIHandleErrorFromDBError("service type", err)
 				}
-				if serviceType == nil || serviceType.LabelValue != core_util.StatefulServiceType {
-					return util.CreateAPIHandleError(400, fmt.Errorf("应用类型不为有状态应用.不支持本地存储"))
+				// local volume just only support state component
+				if serviceInfo == nil || !serviceInfo.IsState() {
+					return util.CreateAPIHandleError(400, fmt.Errorf("应用类型为'无状态'.不支持本地存储"))
 				}
 				tsv.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", localPath, tenantID, tsv.ServiceID, tsv.VolumePath)
 			}
 		}
-		if tsv.VolumeName == "" {
-			tsv.VolumeName = uuid.NewV4().String()
-		}
+		util.SetVolumeDefaultValue(tsv)
 		// begin transaction
 		tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+				tx.Rollback()
+			}
+		}()
 		if err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).AddModel(tsv); err != nil {
 			tx.Rollback()
 			return util.CreateAPIHandleErrorFromDBError("add volume", err)
@@ -1425,17 +1401,38 @@ func (s *ServiceAction) VolumnVar(tsv *dbmodel.TenantServiceVolume, tenantID, fi
 	case "delete":
 		// begin transaction
 		tx := db.GetManager().Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
-			tx.Rollback()
-		}
-	}()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("Unexpected panic occurred, rollback transaction: %v", r)
+				tx.Rollback()
+			}
+		}()
 		if tsv.VolumeName != "" {
-			err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).DeleteModel(tsv.ServiceID, tsv.VolumeName)
-			if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
+			volume, err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).GetVolumeByServiceIDAndName(tsv.ServiceID, tsv.VolumeName)
+			if err != nil {
+				tx.Rollback()
+				return util.CreateAPIHandleErrorFromDBError("find volume", err)
+			}
+
+			if err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).DeleteModel(tsv.ServiceID, tsv.VolumeName); err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
 				tx.Rollback()
 				return util.CreateAPIHandleErrorFromDBError("delete volume", err)
+			}
+
+			err = s.MQClient.SendBuilderTopic(gclient.TaskStruct{
+				Topic:    gclient.WorkerTopic,
+				TaskType: "volume_gc",
+				TaskBody: map[string]interface{}{
+					"tenant_id":   tenantID,
+					"service_id":  volume.ServiceID,
+					"volume_id":   volume.ID,
+					"volume_path": volume.VolumePath,
+				},
+			})
+			if err != nil {
+				logrus.Errorf("send 'volume_gc' task: %v", err)
+				tx.Rollback()
+				return util.CreateAPIHandleErrorFromDBError("send 'volume_gc' task", err)
 			}
 		} else {
 			if err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).DeleteByServiceIDAndVolumePath(tsv.ServiceID, tsv.VolumePath); err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
@@ -1465,50 +1462,75 @@ func (s *ServiceAction) UpdVolume(sid string, req *api_model.UpdVolumeReq) error
 			tx.Rollback()
 		}
 	}()
-	switch req.VolumeType {
-	case "config-file":
-		if req.VolumePath != "" {
-			v, err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).
-				GetVolumeByServiceIDAndName(sid, req.VolumeName)
-			if err != nil {
-				tx.Rollback()
-				return err
-			}
-			v.VolumePath = req.VolumePath
-			if err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).UpdateModel(v); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-		if req.FileContent != "" {
-			configfile, err := db.GetManager().TenantServiceConfigFileDaoTransactions(tx).
-				GetByVolumeName(sid, req.VolumeName)
-			if err != nil {
-				tx.Rollback()
-				return err
-			}
-			configfile.FileContent = req.FileContent
-			if err := db.GetManager().TenantServiceConfigFileDaoTransactions(tx).UpdateModel(configfile); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-	default:
+	v, err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).GetVolumeByServiceIDAndName(sid, req.VolumeName)
+	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("unsupported volume type")
+		return err
+	}
+	v.VolumePath = req.VolumePath
+	if err := db.GetManager().TenantServiceVolumeDaoTransactions(tx).UpdateModel(v); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if req.VolumeType == "config-file" {
+		configfile, err := db.GetManager().TenantServiceConfigFileDaoTransactions(tx).GetByVolumeName(sid, req.VolumeName)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		configfile.FileContent = req.FileContent
+		if err := db.GetManager().TenantServiceConfigFileDaoTransactions(tx).UpdateModel(configfile); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	tx.Commit()
 	return nil
 }
 
 //GetVolumes 获取应用全部存储
-func (s *ServiceAction) GetVolumes(serviceID string) ([]*dbmodel.TenantServiceVolume, *util.APIHandleError) {
-	dbManager := db.GetManager()
-	vs, err := dbManager.TenantServiceVolumeDao().GetTenantServiceVolumesByServiceID(serviceID)
+func (s *ServiceAction) GetVolumes(serviceID string) ([]*api_model.VolumeWithStatusStruct, *util.APIHandleError) {
+	volumeWithStatusList := make([]*api_model.VolumeWithStatusStruct, 0)
+	vs, err := db.GetManager().TenantServiceVolumeDao().GetTenantServiceVolumesByServiceID(serviceID)
 	if err != nil && err.Error() != gorm.ErrRecordNotFound.Error() {
 		return nil, util.CreateAPIHandleErrorFromDBError("get volumes", err)
 	}
-	return vs, nil
+
+	volumeStatusList, err := s.statusCli.GetAppVolumeStatus(serviceID)
+	if err != nil {
+		logrus.Warnf("get volume status error: %s", err.Error())
+	}
+	volumeStatus := make(map[string]pb.ServiceVolumeStatus)
+	if volumeStatusList != nil && volumeStatusList.GetStatus() != nil {
+		volumeStatus = volumeStatusList.GetStatus()
+	}
+	for _, volume := range vs {
+		vws := &api_model.VolumeWithStatusStruct{
+			ServiceID:          volume.ServiceID,
+			Category:           volume.Category,
+			VolumeType:         volume.VolumeType,
+			VolumeName:         volume.VolumeName,
+			HostPath:           volume.HostPath,
+			VolumePath:         volume.VolumePath,
+			IsReadOnly:         volume.IsReadOnly,
+			VolumeCapacity:     volume.VolumeCapacity,
+			AccessMode:         volume.AccessMode,
+			SharePolicy:        volume.SharePolicy,
+			BackupPolicy:       volume.BackupPolicy,
+			ReclaimPolicy:      volume.ReclaimPolicy,
+			AllowExpansion:     volume.AllowExpansion,
+			VolumeProviderName: volume.VolumeProviderName,
+		}
+		volumeID := strconv.FormatInt(int64(volume.ID), 10)
+		if phrase, ok := volumeStatus[volumeID]; ok {
+			vws.Status = phrase.String()
+		} else {
+			vws.Status = pb.ServiceVolumeStatus_NOT_READY.String()
+		}
+		volumeWithStatusList = append(volumeWithStatusList, vws)
+	}
+
+	return volumeWithStatusList, nil
 }
 
 //VolumeDependency VolumeDependency
@@ -1629,22 +1651,68 @@ func (s *ServiceAction) GetStatus(serviceID string) (*api_model.StatusList, erro
 		sl.CurStatus = status
 		sl.StatusCN = TransStatus(status)
 	}
+	di, err := s.statusCli.GetServiceDeployInfo(serviceID)
+	if err != nil {
+		logrus.Warningf("service id: %s; failed to get deploy info: %v", serviceID, err)
+	} else {
+		sl.StartTime = di.GetStartTime()
+	}
 	return sl, nil
 }
 
 //GetServicesStatus  获取一组应用状态，若 serviceIDs为空,获取租户所有应用状态
-func (s *ServiceAction) GetServicesStatus(tenantID string, serviceIDs []string) map[string]string {
+func (s *ServiceAction) GetServicesStatus(tenantID string, serviceIDs []string) []map[string]interface{} {
 	if serviceIDs == nil || len(serviceIDs) == 0 {
 		services, _ := db.GetManager().TenantServiceDao().GetServicesByTenantID(tenantID)
 		for _, s := range services {
 			serviceIDs = append(serviceIDs, s.ServiceID)
 		}
 	}
-	if len(serviceIDs) > 0 {
-		status := s.statusCli.GetStatuss(strings.Join(serviceIDs, ","))
-		return status
+	if len(serviceIDs) == 0 {
+		return []map[string]interface{}{}
 	}
-	return nil
+	statusList := s.statusCli.GetStatuss(strings.Join(serviceIDs, ","))
+	var info = make([]map[string]interface{}, 0)
+	if statusList != nil {
+		for k, v := range statusList {
+			serviceInfo := map[string]interface{}{"service_id": k, "status": v, "status_cn": TransStatus(v), "used_mem": 0}
+			info = append(info, serviceInfo)
+		}
+	}
+	return info
+}
+
+// GetEnterpriseRunningServices get running services
+func (s *ServiceAction) GetEnterpriseRunningServices(enterpriseID string) []string {
+	var tenantIDs []string
+	tenants, err := db.GetManager().EnterpriseDao().GetEnterpriseTenants(enterpriseID)
+	if err != nil {
+		logrus.Errorf("list tenant failed: %s", err.Error())
+		return []string{}
+	}
+	for _, tenant := range tenants {
+		tenantIDs = append(tenantIDs, tenant.UUID)
+	}
+	if len(tenantIDs) == 0 {
+		return []string{}
+	}
+	services, err := db.GetManager().TenantServiceDao().GetServicesByTenantIDs(tenantIDs)
+	if err != nil {
+		logrus.Errorf("list tenants servicee failed: %s", err.Error())
+		return []string{}
+	}
+	var serviceIDs []string
+	for _, svc := range services {
+		serviceIDs = append(serviceIDs, svc.ServiceID)
+	}
+	statusList := s.statusCli.GetStatuss(strings.Join(serviceIDs, ","))
+	retServices := make([]string, 0, 10)
+	for service, status := range statusList {
+		if status == typesv1.RUNNING {
+			retServices = append(retServices, service)
+		}
+	}
+	return retServices
 }
 
 //CreateTenant create tenant
@@ -1681,54 +1749,68 @@ func (s *ServiceAction) CreateTenandIDAndName(eid string) (string, string, error
 	return uid, name, nil
 }
 
+//K8sPodInfos -
+type K8sPodInfos struct {
+	NewPods []*K8sPodInfo `json:"new_pods"`
+	OldPods []*K8sPodInfo `json:"old_pods"`
+}
+
 //K8sPodInfo for api
 type K8sPodInfo struct {
-	ServiceID  string                       `json:"service_id"`
-	DeployID   string                       `json:"deploy_id"`
-	DeployType string                       `json:"deploy_type"`
-	PodName    string                       `json:"pod_name"`
-	PodIP      string                       `json:"pod_ip"`
-	PodStatus  string                       `json:"pod_status"`
-	Container  map[string]map[string]string `json:"container"`
+	PodName   string                       `json:"pod_name"`
+	PodIP     string                       `json:"pod_ip"`
+	PodStatus string                       `json:"pod_status"`
+	ServiceID string                       `json:"service_id"`
+	Container map[string]map[string]string `json:"container"`
 }
 
 //GetPods get pods
-func (s *ServiceAction) GetPods(serviceID string) ([]*K8sPodInfo, error) {
-	var podsInfoList []*K8sPodInfo
+func (s *ServiceAction) GetPods(serviceID string) (*K8sPodInfos, error) {
 	pods, err := s.statusCli.GetServicePods(serviceID)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), server.ErrAppServiceNotFound.Error()) &&
+		!strings.Contains(err.Error(), server.ErrPodNotFound.Error()) {
 		logrus.Error("GetPodByService Error:", err)
 		return nil, err
 	}
-	var podNames []string
-	for _, v := range pods.Pods {
-		var podInfo K8sPodInfo
-		containerInfos := make(map[string]map[string]string, 10)
-		podInfo.ServiceID = v.ServiceId
-		podInfo.DeployID = v.DeployId
-		podInfo.DeployType = v.DeployType
-		podInfo.PodName = v.PodName
-		podInfo.PodIP = v.PodIp
-		podInfo.PodStatus = v.PodStatus
-		for _, container := range v.Containers {
-			containerInfos[container.ContainerName] = map[string]string{
-				"memory_limit": fmt.Sprintf("%d", container.MemoryLimit),
-				"memory_usage": "0",
+	if pods == nil {
+		return nil, nil
+	}
+	convpod := func(pods []*pb.ServiceAppPod) []*K8sPodInfo {
+		var podsInfoList []*K8sPodInfo
+		var podNames []string
+		for _, v := range pods {
+			var podInfo K8sPodInfo
+			podInfo.PodName = v.PodName
+			podInfo.PodIP = v.PodIp
+			podInfo.PodStatus = v.PodStatus
+			podInfo.ServiceID = serviceID
+			containerInfos := make(map[string]map[string]string, 10)
+			for _, container := range v.Containers {
+				containerInfos[container.ContainerName] = map[string]string{
+					"memory_limit": fmt.Sprintf("%d", container.MemoryLimit),
+					"memory_usage": "0",
+				}
+			}
+			podInfo.Container = containerInfos
+			podNames = append(podNames, v.PodName)
+			podsInfoList = append(podsInfoList, &podInfo)
+		}
+		containerMemInfo, _ := s.GetPodContainerMemory(podNames)
+		for _, c := range podsInfoList {
+			for k := range c.Container {
+				if info, exist := containerMemInfo[c.PodName][k]; exist {
+					c.Container[k]["memory_usage"] = info
+				}
 			}
 		}
-		podInfo.Container = containerInfos
-		podNames = append(podNames, v.PodName)
-		podsInfoList = append(podsInfoList, &podInfo)
+		return podsInfoList
 	}
-	containerMemInfo, _ := s.GetPodContainerMemory(podNames)
-	for _, c := range podsInfoList {
-		for k := range c.Container {
-			if info, exist := containerMemInfo[c.PodName][k]; exist {
-				c.Container[k]["memory_usage"] = info
-			}
-		}
-	}
-	return podsInfoList, nil
+	newpods := convpod(pods.NewPods)
+	oldpods := convpod(pods.OldPods)
+	return &K8sPodInfos{
+		NewPods: newpods,
+		OldPods: oldpods,
+	}, nil
 }
 
 //GetPodContainerMemory Use Prometheus to query memory resources
@@ -1736,7 +1818,7 @@ func (s *ServiceAction) GetPodContainerMemory(podNames []string) (map[string]map
 	memoryUsageMap := make(map[string]map[string]string, 10)
 	proxy := GetPrometheusProxy()
 	queryName := strings.Join(podNames, "|")
-	query := fmt.Sprintf(`container_memory_usage_bytes{pod_name=~"%s"}`, queryName)
+	query := fmt.Sprintf(`container_memory_rss{pod=~"%s"}`, queryName)
 	proQuery := strings.Replace(query, " ", "%20", -1)
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:9999/api/v1/query?query=%s", proQuery), nil)
 	if err != nil {
@@ -1761,10 +1843,10 @@ func (s *ServiceAction) GetPodContainerMemory(podNames []string) (map[string]map
 				var containerName, podName string
 				var valuesBytes string
 				if cname, ok := re["metric"].(map[string]interface{}); ok {
-					if containerName, ok = cname["container_name"].(string); !ok {
+					if containerName, ok = cname["container"].(string); !ok {
 						continue
 					}
-					if podName, ok = cname["pod_name"].(string); !ok {
+					if podName, ok = cname["pod"].(string); !ok {
 						continue
 					}
 				} else {
@@ -1792,7 +1874,41 @@ func (s *ServiceAction) GetPodContainerMemory(podNames []string) (map[string]map
 }
 
 //TransServieToDelete trans service info to delete table
-func (s *ServiceAction) TransServieToDelete(serviceID string) error {
+func (s *ServiceAction) TransServieToDelete(tenantID, serviceID string) error {
+	_, err := db.GetManager().TenantServiceDao().GetServiceByID(serviceID)
+	if err != nil && gorm.ErrRecordNotFound == err {
+		logrus.Infof("service[%s] of tenant[%s] do not exist, ignore it", serviceID, tenantID)
+		return nil
+	}
+	if err := s.isServiceClosed(serviceID); err != nil {
+		return err
+	}
+
+	body, err := s.gcTaskBody(tenantID, serviceID)
+	if err != nil {
+		return fmt.Errorf("GC task body: %v", err)
+	}
+
+	if err := s.delServiceMetadata(serviceID); err != nil {
+		return fmt.Errorf("delete service-related metadata: %v", err)
+	}
+
+	// let rbd-chaos remove related persistent data
+	logrus.Info("let rbd-chaos remove related persistent data")
+	topic := gclient.WorkerTopic
+	if err := s.MQClient.SendBuilderTopic(gclient.TaskStruct{
+		Topic:    topic,
+		TaskType: "service_gc",
+		TaskBody: body,
+	}); err != nil {
+		logrus.Warningf("send gc task: %v", err)
+	}
+
+	return nil
+}
+
+// isServiceClosed checks if the service has been closed according to the serviceID.
+func (s *ServiceAction) isServiceClosed(serviceID string) error {
 	service, err := db.GetManager().TenantServiceDao().GetServiceByID(serviceID)
 	if err != nil {
 		return err
@@ -1800,8 +1916,17 @@ func (s *ServiceAction) TransServieToDelete(serviceID string) error {
 	status := s.statusCli.GetStatus(serviceID)
 	if service.Kind != dbmodel.ServiceKindThirdParty.String() {
 		if !s.statusCli.IsClosedStatus(status) {
-			return fmt.Errorf("unclosed")
+			return ErrServiceNotClosed
 		}
+	}
+	return nil
+}
+
+// delServiceMetadata deletes service-related metadata in the database.
+func (s *ServiceAction) delServiceMetadata(serviceID string) error {
+	service, err := db.GetManager().TenantServiceDao().GetServiceByID(serviceID)
+	if err != nil {
+		return err
 	}
 	tx := db.GetManager().Begin()
 	defer func() {
@@ -1817,24 +1942,24 @@ func (s *ServiceAction) TransServieToDelete(serviceID string) error {
 		return err
 	}
 	var deleteServicePropertyFunc = []func(serviceID string) error{
-		db.GetManager().TenantServiceDaoTransactions(tx).DeleteServiceByServiceID,
-		db.GetManager().TenantServiceMountRelationDaoTransactions(tx).DELTenantServiceMountRelationByServiceID,
+		db.GetManager().CodeCheckResultDaoTransactions(tx).DeleteByServiceID,
 		db.GetManager().TenantServiceEnvVarDaoTransactions(tx).DELServiceEnvsByServiceID,
-		db.GetManager().TenantServicesPortDaoTransactions(tx).DELPortsByServiceID,
-		db.GetManager().TenantServiceRelationDaoTransactions(tx).DELRelationsByServiceID,
-		db.GetManager().TenantServiceLBMappingPortDaoTransactions(tx).DELServiceLBMappingPortByServiceID,
-		db.GetManager().TenantServiceVolumeDaoTransactions(tx).DeleteTenantServiceVolumesByServiceID,
-		db.GetManager().TenantServiceConfigFileDaoTransactions(tx).DelByServiceID,
-		db.GetManager().ServiceProbeDaoTransactions(tx).DELServiceProbesByServiceID,
+		db.GetManager().TenantPluginVersionConfigDaoTransactions(tx).DeletePluginConfigByServiceID,
 		db.GetManager().TenantServicePluginRelationDaoTransactions(tx).DeleteALLRelationByServiceID,
 		db.GetManager().TenantServicesStreamPluginPortDaoTransactions(tx).DeleteAllPluginMappingPortByServiceID,
-		db.GetManager().TenantPluginVersionENVDaoTransactions(tx).DeleteEnvByServiceID,
-		db.GetManager().TenantPluginVersionConfigDaoTransactions(tx).DeletePluginConfigByServiceID,
-		db.GetManager().TenantServiceLabelDaoTransactions(tx).DeleteLabelByServiceID,
-		db.GetManager().HTTPRuleDaoTransactions(tx).DeleteHTTPRuleByServiceID,
-		db.GetManager().TCPRuleDaoTransactions(tx).DeleteTCPRuleByServiceID,
-		db.GetManager().ThirdPartySvcDiscoveryCfgDaoTransactions(tx).DeleteByServiceID,
+		db.GetManager().TenantServiceDaoTransactions(tx).DeleteServiceByServiceID,
+		db.GetManager().TenantServicesPortDaoTransactions(tx).DELPortsByServiceID,
+		db.GetManager().TenantServiceRelationDaoTransactions(tx).DELRelationsByServiceID,
+		db.GetManager().TenantServiceMountRelationDaoTransactions(tx).DELTenantServiceMountRelationByServiceID,
+		db.GetManager().TenantServiceVolumeDaoTransactions(tx).DeleteTenantServiceVolumesByServiceID,
+		db.GetManager().TenantServiceConfigFileDaoTransactions(tx).DelByServiceID,
 		db.GetManager().EndpointsDaoTransactions(tx).DeleteByServiceID,
+		db.GetManager().ThirdPartySvcDiscoveryCfgDaoTransactions(tx).DeleteByServiceID,
+		db.GetManager().TenantServiceLabelDaoTransactions(tx).DeleteLabelByServiceID,
+		db.GetManager().VersionInfoDaoTransactions(tx).DeleteVersionByServiceID,
+		db.GetManager().TenantPluginVersionENVDaoTransactions(tx).DeleteEnvByServiceID,
+		db.GetManager().ServiceProbeDaoTransactions(tx).DELServiceProbesByServiceID,
+		db.GetManager().ServiceEventDaoTransactions(tx).DelEventByServiceID,
 	}
 	if err := GetGatewayHandler().DeleteTCPRuleByServiceIDWithTransaction(serviceID, tx); err != nil {
 		tx.Rollback()
@@ -1846,7 +1971,7 @@ func (s *ServiceAction) TransServieToDelete(serviceID string) error {
 	}
 	for _, del := range deleteServicePropertyFunc {
 		if err := del(serviceID); err != nil {
-			if err.Error() != gorm.ErrRecordNotFound.Error() {
+			if err != gorm.ErrRecordNotFound {
 				tx.Rollback()
 				return err
 			}
@@ -1857,6 +1982,40 @@ func (s *ServiceAction) TransServieToDelete(serviceID string) error {
 		return err
 	}
 	return nil
+}
+
+// delLogFile deletes persistent data related to the service based on serviceID.
+func (s *ServiceAction) delLogFile(serviceID string, eventIDs []string) {
+	// log generated during service running
+	dockerLogPath := eventutil.DockerLogFilePath(s.conf.LogPath, serviceID)
+	if err := os.RemoveAll(dockerLogPath); err != nil {
+		logrus.Warningf("remove docker log files: %v", err)
+	}
+	// log generated by the service event
+	eventLogPath := eventutil.EventLogFilePath(s.conf.LogPath)
+	for _, eventID := range eventIDs {
+		eventLogFileName := eventutil.EventLogFileName(eventLogPath, eventID)
+		if err := os.RemoveAll(eventLogFileName); err != nil {
+			logrus.Warningf("file: %s; remove event log file: %v", eventLogFileName, err)
+		}
+	}
+}
+
+func (s *ServiceAction) gcTaskBody(tenantID, serviceID string) (map[string]interface{}, error) {
+	events, err := db.GetManager().ServiceEventDao().ListByTargetID(serviceID)
+	if err != nil {
+		logrus.Errorf("list events based on serviceID: %v", err)
+	}
+	var eventIDs []string
+	for _, event := range events {
+		eventIDs = append(eventIDs, event.EventID)
+	}
+
+	return map[string]interface{}{
+		"tenant_id":  tenantID,
+		"service_id": serviceID,
+		"event_ids":  eventIDs,
+	}, nil
 }
 
 //GetServiceDeployInfo get service deploy info
@@ -1880,11 +2039,149 @@ func (s *ServiceAction) ListVersionInfo(serviceID string) (*api_model.BuildListR
 		logrus.Errorf("error getting service by uuid: %v", err)
 		return nil, fmt.Errorf("error getting service by uuid: %v", err)
 	}
+	b, err := json.Marshal(versionInfos)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling version infos: %v", err)
+	}
+	var bversions []*api_model.BuildVersion
+	if err := json.Unmarshal(b, &bversions); err != nil {
+		return nil, fmt.Errorf("error unmarshaling version infos: %v", err)
+	}
+	for idx := range bversions {
+		bv := bversions[idx]
+		if bv.Kind == "build_from_image" || bv.Kind == "build_from_market_image" {
+			image := parser.ParseImageName(bv.RepoURL)
+			bv.ImageDomain = image.GetDomain()
+			bv.ImageRepo = image.GetRepostory()
+			bv.ImageTag = image.GetTag()
+		}
+	}
 	result := &api_model.BuildListRespVO{
 		DeployVersion: svc.DeployVersion,
-		List:          versionInfos,
+		List:          bversions,
 	}
 	return result, nil
+}
+
+// AddAutoscalerRule -
+func (s *ServiceAction) AddAutoscalerRule(req *api_model.AutoscalerRuleReq) error {
+	tx := db.GetManager().Begin()
+	defer db.GetManager().EnsureEndTransactionFunc()
+
+	r := &dbmodel.TenantServiceAutoscalerRules{
+		RuleID:      req.RuleID,
+		ServiceID:   req.ServiceID,
+		Enable:      req.Enable,
+		XPAType:     req.XPAType,
+		MinReplicas: req.MinReplicas,
+		MaxReplicas: req.MaxReplicas,
+	}
+	if err := db.GetManager().TenantServceAutoscalerRulesDaoTransactions(tx).AddModel(r); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	for _, metric := range req.Metrics {
+		m := &dbmodel.TenantServiceAutoscalerRuleMetrics{
+			RuleID:            req.RuleID,
+			MetricsType:       metric.MetricsType,
+			MetricsName:       metric.MetricsName,
+			MetricTargetType:  metric.MetricTargetType,
+			MetricTargetValue: metric.MetricTargetValue,
+		}
+		if err := db.GetManager().TenantServceAutoscalerRuleMetricsDaoTransactions(tx).AddModel(m); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	taskbody := map[string]interface{}{
+		"service_id": r.ServiceID,
+		"rule_id":    r.RuleID,
+	}
+	if err := s.MQClient.SendBuilderTopic(gclient.TaskStruct{
+		TaskType: "refreshhpa",
+		TaskBody: taskbody,
+		Topic:    gclient.WorkerTopic,
+	}); err != nil {
+		logrus.Errorf("send 'refreshhpa' task: %v", err)
+		return err
+	}
+	logrus.Infof("rule id: %s; successfully send 'refreshhpa' task.", r.RuleID)
+
+	return tx.Commit().Error
+}
+
+// UpdAutoscalerRule -
+func (s *ServiceAction) UpdAutoscalerRule(req *api_model.AutoscalerRuleReq) error {
+	rule, err := db.GetManager().TenantServceAutoscalerRulesDao().GetByRuleID(req.RuleID)
+	if err != nil {
+		return err
+	}
+
+	rule.Enable = req.Enable
+	rule.XPAType = req.XPAType
+	rule.MinReplicas = req.MinReplicas
+	rule.MaxReplicas = req.MaxReplicas
+
+	tx := db.GetManager().Begin()
+	defer db.GetManager().EnsureEndTransactionFunc()
+
+	if err := db.GetManager().TenantServceAutoscalerRulesDaoTransactions(tx).UpdateModel(rule); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// delete metrics
+	if err := db.GetManager().TenantServceAutoscalerRuleMetricsDaoTransactions(tx).DeleteByRuleID(req.RuleID); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	for _, metric := range req.Metrics {
+		m := &dbmodel.TenantServiceAutoscalerRuleMetrics{
+			RuleID:            req.RuleID,
+			MetricsType:       metric.MetricsType,
+			MetricsName:       metric.MetricsName,
+			MetricTargetType:  metric.MetricTargetType,
+			MetricTargetValue: metric.MetricTargetValue,
+		}
+		if err := db.GetManager().TenantServceAutoscalerRuleMetricsDaoTransactions(tx).AddModel(m); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	taskbody := map[string]interface{}{
+		"service_id": rule.ServiceID,
+		"rule_id":    rule.RuleID,
+	}
+	if err := s.MQClient.SendBuilderTopic(gclient.TaskStruct{
+		TaskType: "refreshhpa",
+		TaskBody: taskbody,
+		Topic:    gclient.WorkerTopic,
+	}); err != nil {
+		logrus.Errorf("send 'refreshhpa' task: %v", err)
+		return err
+	}
+	logrus.Infof("rule id: %s; successfully send 'refreshhpa' task.", rule.RuleID)
+
+	return tx.Commit().Error
+}
+
+// ListScalingRecords -
+func (s *ServiceAction) ListScalingRecords(serviceID string, page, pageSize int) ([]*dbmodel.TenantServiceScalingRecords, int, error) {
+	records, err := db.GetManager().TenantServiceScalingRecordsDao().ListByServiceID(serviceID, (page-1)*pageSize, pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	count, err := db.GetManager().TenantServiceScalingRecordsDao().CountByServiceID(serviceID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return records, count, nil
 }
 
 //TransStatus trans service status
@@ -1936,14 +2233,4 @@ func CheckMapKey(rebody map[string]interface{}, key string, defaultValue interfa
 	}
 	rebody[key] = defaultValue
 	return rebody
-}
-
-func chekeServiceLabel(v string) string {
-	if strings.Contains(v, "有状态") {
-		return core_util.StatefulServiceType
-	}
-	if strings.Contains(v, "无状态") {
-		return core_util.StatelessServiceType
-	}
-	return v
 }

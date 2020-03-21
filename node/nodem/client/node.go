@@ -23,16 +23,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/goodrain/rainbond/util"
-
-	v1 "k8s.io/api/core/v1"
-
 	"github.com/Sirupsen/logrus"
 	client "github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	conf "github.com/goodrain/rainbond/cmd/node/option"
 	"github.com/goodrain/rainbond/node/core/store"
+	"github.com/goodrain/rainbond/util"
 	"github.com/pquerna/ffjson/ffjson"
+	v1 "k8s.io/api/core/v1"
 )
 
 //LabelOS node label about os
@@ -55,17 +53,18 @@ type APIHostNode struct {
 //Clone Clone
 func (a APIHostNode) Clone() *HostNode {
 	hn := &HostNode{
-		ID:         a.ID,
-		HostName:   a.HostName,
-		InternalIP: a.InternalIP,
-		ExternalIP: a.ExternalIP,
-		RootPass:   a.RootPass,
-		KeyPath:    a.Privatekey,
-		Role:       a.Role,
-		Labels:     map[string]string{"rainbond_node_hostname": a.HostName},
-		NodeStatus: NodeStatus{Status: "not_installed", Conditions: make([]NodeCondition, 0)},
-		Status:     "not_installed",
-		PodCIDR:    a.PodCIDR,
+		ID:           a.ID,
+		HostName:     a.HostName,
+		InternalIP:   a.InternalIP,
+		ExternalIP:   a.ExternalIP,
+		RootPass:     a.RootPass,
+		KeyPath:      a.Privatekey,
+		Role:         a.Role,
+		Labels:       map[string]string{"rainbond_node_hostname": a.HostName},
+		CustomLabels: map[string]string{},
+		NodeStatus:   NodeStatus{Status: "not_installed", Conditions: make([]NodeCondition, 0)},
+		Status:       "not_installed",
+		PodCIDR:      a.PodCIDR,
 		//node default unscheduler
 		Unschedulable: true,
 	}
@@ -86,21 +85,26 @@ type HostNode struct {
 	Mode            string            `json:"mode"`
 	Role            HostRule          `json:"role"` //compute, manage, storage, gateway
 	Status          string            `json:"status"`
-	Labels          map[string]string `json:"labels"`        //节点标签 内置标签+用户自定义标签
-	Unschedulable   bool              `json:"unschedulable"` //设置值
+	Labels          map[string]string `json:"labels"`        // system labels
+	CustomLabels    map[string]string `json:"custom_labels"` // custom labels
+	Unschedulable   bool              `json:"unschedulable"` // 设置值
 	PodCIDR         string            `json:"podCIDR"`
 	NodeStatus      NodeStatus        `json:"node_status"`
 }
 
 //Resource 资源
 type Resource struct {
-	CpuR int `json:"cpu"`
+	CPU  int `json:"cpu"`
 	MemR int `json:"mem"`
 }
+
+// NodePodResource -
 type NodePodResource struct {
 	AllocatedResources `json:"allocatedresources"`
 	Resource           `json:"allocatable"`
 }
+
+// AllocatedResources -
 type AllocatedResources struct {
 	CPURequests     int64
 	CPULimits       int64
@@ -153,6 +157,22 @@ func (n *HostNode) UpdateK8sNodeStatus(k8sNode v1.Node) {
 		ContainerRuntimeVersion: status.NodeInfo.ContainerRuntimeVersion,
 		Architecture:            status.NodeInfo.Architecture,
 	}
+}
+
+// MergeLabels merges custom lables into labels.
+func (n *HostNode) MergeLabels() map[string]string {
+	// TODO: Parallel
+	labels := make(map[string]string, len(n.Labels)+len(n.CustomLabels))
+	// copy labels
+	for k, v := range n.Labels {
+		labels[k] = v
+	}
+	for k, v := range n.CustomLabels {
+		if _, ok := n.Labels[k]; !ok {
+			labels[k] = v
+		}
+	}
+	return labels
 }
 
 // NodeSystemInfo is a set of ids/uuids to uniquely identify the node.
@@ -286,34 +306,14 @@ func (n *HostNode) UpdateReadyStatus() {
 	var Reason, Message string
 	for _, con := range n.NodeStatus.Conditions {
 		if con.Status != ConditionTrue && con.Type != "" && con.Type != NodeReady {
-			logrus.Debugf("because %s id false, will set node health is false", con.Type)
+			logrus.Debugf("because %s id false, will set node %s(%s) health is false", con.Type, n.ID, n.InternalIP)
 			status = ConditionFalse
 			Reason = con.Reason
 			Message = con.Message
 			break
 		}
 	}
-	for i, con := range n.NodeStatus.Conditions {
-		if con.Type.Compare(NodeReady) {
-			n.NodeStatus.Conditions[i].Reason = Reason
-			n.NodeStatus.Conditions[i].Message = Message
-			n.NodeStatus.Conditions[i].LastHeartbeatTime = time.Now()
-			if con.Status != status {
-				n.NodeStatus.Conditions[i].LastTransitionTime = time.Now()
-				n.NodeStatus.Conditions[i].Status = status
-			}
-			return
-		}
-	}
-	ready := NodeCondition{
-		Type:               NodeReady,
-		Status:             status,
-		LastHeartbeatTime:  time.Now(),
-		LastTransitionTime: time.Now(),
-		Reason:             Reason,
-		Message:            Message,
-	}
-	n.NodeStatus.Conditions = append(n.NodeStatus.Conditions, ready)
+	n.GetAndUpdateCondition(NodeReady, status, Reason, Message)
 }
 
 //GetCondition get condition
@@ -324,6 +324,31 @@ func (n *HostNode) GetCondition(ctype NodeConditionType) *NodeCondition {
 		}
 	}
 	return nil
+}
+
+// GetAndUpdateCondition get old condition and update it, if old condition is nil and then create it
+func (n *HostNode) GetAndUpdateCondition(condType NodeConditionType, status ConditionStatus, reason, message string) {
+	oldCond := n.GetCondition(condType)
+	now := time.Now()
+	var lastTransitionTime time.Time
+	if oldCond == nil {
+		lastTransitionTime = now
+	} else {
+		if oldCond.Status != status {
+			lastTransitionTime = now
+		} else {
+			lastTransitionTime = oldCond.LastTransitionTime
+		}
+	}
+	cond := NodeCondition{
+		Type:               condType,
+		Status:             status,
+		LastHeartbeatTime:  now,
+		LastTransitionTime: lastTransitionTime,
+		Reason:             reason,
+		Message:            message,
+	}
+	n.UpdataCondition(cond)
 }
 
 //UpdataCondition 更新状态
@@ -345,7 +370,6 @@ func (n *HostNode) UpdataCondition(conditions ...NodeCondition) {
 		if !update {
 			n.NodeStatus.Conditions = append(n.NodeStatus.Conditions, newcon)
 		}
-		n.UpdateReadyStatus()
 	}
 }
 
@@ -413,13 +437,23 @@ const (
 	NodeUp        NodeConditionType = "NodeUp"
 	// InstallNotReady means  the installation task was not completed in this node.
 	InstallNotReady NodeConditionType = "InstallNotReady"
-	// NodeInit means node already install rainbond node and regist
-	NodeInit       NodeConditionType = "NodeInit"
-	OutOfDisk      NodeConditionType = "OutOfDisk"
-	MemoryPressure NodeConditionType = "MemoryPressure"
-	DiskPressure   NodeConditionType = "DiskPressure"
-	PIDPressure    NodeConditionType = "PIDPressure"
+	OutOfDisk       NodeConditionType = "OutOfDisk"
+	MemoryPressure  NodeConditionType = "MemoryPressure"
+	DiskPressure    NodeConditionType = "DiskPressure"
+	PIDPressure     NodeConditionType = "PIDPressure"
 )
+
+var masterCondition = []NodeConditionType{NodeReady, KubeNodeReady, NodeUp, InstallNotReady, OutOfDisk, MemoryPressure, DiskPressure, PIDPressure}
+
+//IsMasterCondition Whether it is a preset condition of the system
+func IsMasterCondition(con NodeConditionType) bool {
+	for _, c := range masterCondition {
+		if c.Compare(con) {
+			return true
+		}
+	}
+	return false
+}
 
 //Compare 比较
 func (nt NodeConditionType) Compare(ent NodeConditionType) bool {
@@ -475,4 +509,34 @@ func (n *HostNode) Update() (*client.PutResponse, error) {
 //DeleteNode delete node
 func (n *HostNode) DeleteNode() (*client.DeleteResponse, error) {
 	return store.DefalutClient.Delete(conf.Config.NodePath + "/" + n.ID)
+}
+
+// DelEndpoints -
+func (n *HostNode) DelEndpoints() {
+	keys, err := n.listEndpointKeys()
+	if err != nil {
+		logrus.Warningf("error deleting endpoints: %v", err)
+		return
+	}
+	for _, key := range keys {
+		_, err := store.DefalutClient.Delete(key)
+		if err != nil {
+			logrus.Warnf("key: %s; error delete endpoints: %v", key, err)
+		}
+	}
+}
+
+func (n *HostNode) listEndpointKeys() ([]string, error) {
+	resp, err := store.DefalutClient.Get(RainbondEndpointPrefix, client.WithPrefix())
+	if err != nil {
+		return nil, fmt.Errorf("prefix: %s; error list rainbond endpoint keys by prefix: %v", RainbondEndpointPrefix, err)
+	}
+	var res []string
+	for _, kv := range resp.Kvs {
+		key := string(kv.Key)
+		if strings.Contains(key, n.InternalIP) {
+			res = append(res, key)
+		}
+	}
+	return res, nil
 }

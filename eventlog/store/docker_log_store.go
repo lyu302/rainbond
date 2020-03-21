@@ -85,6 +85,7 @@ func (h *dockerLogStore) InsertMessage(message *db.EventLogMessage) {
 	defer h.rwLock.Unlock()
 	ba := h.pool.Get().(*dockerLogEventBarrel)
 	ba.name = message.EventID
+	ba.persistenceTime = time.Now()
 	ba.insertMessage(message)
 	h.barrels[message.EventID] = ba
 	h.barrelSize++
@@ -105,6 +106,7 @@ func (h *dockerLogStore) SubChan(eventID, subID string) chan *db.EventLogMessage
 	h.rwLock.Lock()
 	defer h.rwLock.Unlock()
 	ba := h.pool.Get().(*dockerLogEventBarrel)
+	ba.name = eventID
 	h.barrels[eventID] = ba
 	return ba.addSubChan(subID)
 }
@@ -131,7 +133,7 @@ func (h *dockerLogStore) GetMonitorData() *db.MonitorData {
 	return data
 }
 func (h *dockerLogStore) Gc() {
-	tiker := time.NewTicker(time.Minute * 1)
+	tiker := time.NewTicker(time.Second * 30)
 	for {
 		select {
 		case <-tiker.C:
@@ -150,17 +152,16 @@ func (h *dockerLogStore) handle() []string {
 		return nil
 	}
 	var gcEvent []string
-	for k, v := range h.barrels {
-		if v.updateTime.Add(time.Minute * 1).Before(time.Now()) { // barrel 超时未收到消息
-			//gc without client link
-			if v.GetSubChanLength() == 0 {
-				h.saveBeforeGc(k, v)
-				gcEvent = append(gcEvent, k)
-			}
-		}
-		if v.persistenceTime.Add(time.Minute * 2).Before(time.Now()) { //超过2分钟未持久化 间隔需要大于1分钟。以分钟为单位
-			if len(v.barrel) > 0 {
-				v.persistence()
+	for k := range h.barrels {
+		if h.barrels[k].updateTime.Add(time.Minute*1).Before(time.Now()) && h.barrels[k].GetSubChanLength() == 0 {
+			h.saveBeforeGc(k, h.barrels[k])
+			gcEvent = append(gcEvent, k)
+			h.log.Debugf("barrel %s need be gc", k)
+		} else if h.barrels[k].persistenceTime.Add(time.Minute * 1).Before(time.Now()) {
+			//The interval not persisted for more than 1 minute should be more than 30 seconds
+			if len(h.barrels[k].barrel) > 0 {
+				h.log.Debugf("barrel %s need persistence", k)
+				h.barrels[k].persistence()
 			}
 		}
 	}
@@ -178,7 +179,7 @@ func (h *dockerLogStore) gcRun() {
 		for _, id := range gcEvent {
 			barrel := h.barrels[id]
 			barrel.empty()
-			h.pool.Put(barrel) //放回对象池
+			h.pool.Put(barrel)
 			delete(h.barrels, id)
 			h.barrelSize--
 			h.log.Debugf("docker log barrel(%s) gc complete", id)
@@ -247,4 +248,32 @@ func (h *dockerLogStore) persistence(event []string) {
 			}
 		}
 	}
+}
+
+func (h *dockerLogStore) GetHistoryMessage(eventID string, length int) (re []string) {
+	h.rwLock.RLock()
+	defer h.rwLock.RUnlock()
+	if ba, ok := h.barrels[eventID]; ok {
+		for _, m := range ba.barrel {
+			if len(m.Content) > 0 {
+				re = append(re, string(m.Content))
+			}
+		}
+	}
+	logrus.Debugf("want length: %d; the length of re: %d;", length, len(re))
+	if len(re) >= length && length > 0 {
+		return re[:length-1]
+	}
+	filelength := func() int {
+		if length-len(re) > 0 {
+			return length - len(re)
+		}
+		return 0
+	}()
+	result, err := h.filePlugin.GetMessages(eventID, "", filelength)
+	if result == nil || err != nil {
+		return re
+	}
+	re = append(result.([]string), re...)
+	return re
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/goodrain/rainbond/webcli/app"
 
 	"github.com/Sirupsen/logrus"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 )
 
 //Run start run
@@ -38,7 +39,8 @@ func Run(s *option.WebCliServer) error {
 	option.Address = s.Address
 	option.Port = strconv.Itoa(s.Port)
 	option.SessionKey = s.SessionKey
-	ap, err := app.New(nil, &option)
+	option.K8SConfPath = s.K8SConfPath
+	ap, err := app.New(&option)
 	if err != nil {
 		return err
 	}
@@ -47,7 +49,13 @@ func Run(s *option.WebCliServer) error {
 		return err
 	}
 	defer ap.Exit()
-	keepalive, err := discover.CreateKeepAlive(s.EtcdEndPoints, "acp_webcli", s.HostName, s.HostIP, s.Port)
+	etcdClientArgs := &etcdutil.ClientArgs{
+		Endpoints: s.EtcdEndPoints,
+		CaFile:    s.EtcdCaFile,
+		CertFile:  s.EtcdCertFile,
+		KeyFile:   s.EtcdKeyFile,
+	}
+	keepalive, err := discover.CreateKeepAlive(etcdClientArgs, "acp_webcli", s.HostName, s.HostIP, s.Port)
 	if err != nil {
 		return err
 	}

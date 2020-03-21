@@ -88,12 +88,6 @@ type RuleExtensionStruct struct {
 	Value string `json:"value"`
 }
 
-// IPPoolStruct contains request data for AddIPPool or UpdateIPPool
-type IPPoolStruct struct {
-	EID  string `json:"eid" validate:"eid|required"`
-	CIDR string `json:"cidr" validate:"cidr|required"`
-}
-
 // AddRuleConfigReq -
 type AddRuleConfigReq struct {
 	ConfigID string `json:"config_id" validate:"config_id|required"`
@@ -121,8 +115,10 @@ type AddOrUpdRuleConfigReq struct {
 
 // RuleConfigReq -
 type RuleConfigReq struct {
-	RuleID string `json:"rule_id,omitempty" validate:"rule_id|required"`
-	Body   Body   `json:"body" validate:"body|required"`
+	RuleID    string `json:"rule_id,omitempty" validate:"rule_id|required"`
+	ServiceID string
+	EventID   string
+	Body      Body `json:"body" validate:"body|required"`
 }
 
 // Body is a embedded sturct of RuleConfigReq.
@@ -146,4 +142,12 @@ type Rewrite struct {
 	Regex       string `json:"regex"`
 	Replacement string `json:"replacement"`
 	Flag        string `json:"flag" validate:"flag|in:last,break,redirect,permanent"`
+}
+
+// UpdCertificateReq -
+type UpdCertificateReq struct {
+	CertificateID   string `json:"certificate_id"`
+	CertificateName string `json:"certificate_name"`
+	Certificate     string `json:"certificate"`
+	PrivateKey      string `json:"private_key"`
 }

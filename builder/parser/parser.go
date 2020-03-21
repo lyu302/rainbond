@@ -20,6 +20,7 @@ package parser
 
 import (
 	"fmt"
+	dbmodel "github.com/goodrain/rainbond/db/model"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
@@ -28,7 +29,6 @@ import (
 	"github.com/goodrain/rainbond/builder/parser/discovery"
 	"github.com/goodrain/rainbond/builder/parser/types"
 	"github.com/goodrain/rainbond/builder/sources"
-	"github.com/goodrain/rainbond/util"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -105,6 +105,9 @@ type Image struct {
 
 //String -
 func (i Image) String() string {
+	if i.name == nil {
+		return ""
+	}
 	return i.name.String()
 }
 
@@ -115,11 +118,17 @@ func (i Image) GetTag() string {
 
 //GetRepostory get repostory
 func (i Image) GetRepostory() string {
+	if i.name == nil {
+		return ""
+	}
 	return reference.Path(i.name)
 }
 
 //GetDomain get image registry domain
 func (i Image) GetDomain() string {
+	if i.name == nil {
+		return ""
+	}
 	domain := reference.Domain(i.name)
 	if domain == "docker.io" {
 		domain = "registry-1.docker.io"
@@ -156,21 +165,22 @@ type Lang string
 
 //ServiceInfo 智能获取的应用信息
 type ServiceInfo struct {
-	ID                string         `json:"id,omitempty"`
-	Ports             []types.Port   `json:"ports,omitempty"`
-	Envs              []types.Env    `json:"envs,omitempty"`
-	Volumes           []types.Volume `json:"volumes,omitempty"`
-	Image             Image          `json:"image,omitempty"`
-	Args              []string       `json:"args,omitempty"`
-	DependServices    []string       `json:"depends,omitempty"`
-	ServiceDeployType string         `json:"deploy_type,omitempty"`
-	Branchs           []string       `json:"branchs,omitempty"`
-	Memory            int            `json:"memory,omitempty"`
-	Lang              code.Lang      `json:"language,omitempty"`
-	ImageAlias        string         `json:"image_alias,omitempty"`
+	ID             string         `json:"id,omitempty"`
+	Ports          []types.Port   `json:"ports,omitempty"`
+	Envs           []types.Env    `json:"envs,omitempty"`
+	Volumes        []types.Volume `json:"volumes,omitempty"`
+	Image          Image          `json:"image,omitempty"`
+	Args           []string       `json:"args,omitempty"`
+	DependServices []string       `json:"depends,omitempty"`
+	ServiceType    string         `json:"service_type,omitempty"`
+	Branchs        []string       `json:"branchs,omitempty"`
+	Memory         int            `json:"memory,omitempty"`
+	Lang           code.Lang      `json:"language,omitempty"`
+	ImageAlias     string         `json:"image_alias,omitempty"`
 	//For third party services
 	Endpoints []*discovery.Endpoint `json:"endpoints,omitempty"`
-
+	//os type,default linux
+	OS        string `json:"os"`
 	Name      string `json:"name,omitempty"`  // module name
 	Cname     string `json:"cname,omitempty"` // service cname
 	Packaging string `json:"packaging,omitempty"`
@@ -227,10 +237,10 @@ var dbImageKey = []string{
 func DetermineDeployType(imageName Image) string {
 	for _, key := range dbImageKey {
 		if strings.ToLower(imageName.GetSimpleName()) == key {
-			return util.StatefulServiceType
+			return dbmodel.ServiceTypeStateSingleton.String()
 		}
 	}
-	return util.StatelessServiceType
+	return dbmodel.ServiceTypeStatelessMultiple.String()
 }
 
 //readmemory
@@ -239,22 +249,57 @@ func DetermineDeployType(imageName Image) string {
 //10k 128
 //10b 128
 func readmemory(s string) int {
-	q, err := resource.ParseQuantity(strings.ToUpper(s))
+	def := 512
+	s = strings.ToLower(s)
+	// <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei
+	isValid := false
+	validUnits := map[string]string{
+		"gi": "Gi", "mi": "Mi", "ki": "Ki",
+	}
+	for k, v := range validUnits {
+		if strings.Contains(s, k) {
+			isValid = true
+			s = strings.Replace(s, k, v, 1)
+			break
+		}
+	}
+	if !isValid {
+		validUnits := map[string]string{
+			"g": "Gi", "m": "Mi", "k": "Ki",
+		}
+		for k, v := range validUnits {
+			if strings.Contains(s, k) {
+				isValid = true
+				s = strings.Replace(s, k, v, 1)
+				break
+			}
+		}
+	}
+	if !isValid {
+		logrus.Warningf("s: %s; invalid unit", s)
+		return def
+	}
+	q, err := resource.ParseQuantity(s)
 	if err != nil {
-		return 512
+		logrus.Warningf("s: %s; failed to parse quantity: %v", s, err)
+		return def
 	}
-	re, _ := q.AsInt64()
+	re, ok := q.AsInt64()
+	if !ok {
+		logrus.Warningf("failed to int64: %d", re)
+		return def
+	}
 	if re != 0 {
-		return int(re) / (1000 * 1000)
+		return int(re) / (1024 * 1024)
 	}
-	return 512
+	return def
 }
 
 //ParseImageName parse image name
 func ParseImageName(s string) (i Image) {
 	ref, err := reference.ParseAnyReference(s)
 	if err != nil {
-		logrus.Errorf("parse image failure %s", err.Error())
+		logrus.Errorf("image name: %s; parse image failure %s", s, err.Error())
 		return i
 	}
 	name, err := reference.ParseNamed(ref.String())

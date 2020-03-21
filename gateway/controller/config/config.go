@@ -83,7 +83,7 @@ func NewDefault() Configuration {
 	cfg := Configuration{
 		Backend: defaults.Backend{
 			ProxyBodySize:          bodySize,
-			ProxyConnectTimeout:    75,
+			ProxyConnectTimeout:    60,
 			ProxyReadTimeout:       60,
 			ProxySendTimeout:       60,
 			ProxyBuffersNumber:     4,
@@ -102,10 +102,18 @@ func NewDefault() Configuration {
 			LimitRate:              0,
 			LimitRateAfter:         0,
 			ProxyBuffering:         "off",
+			//defaut set header
 			ProxySetHeaders: map[string]string{
-				"Host":            "$http_host",
-				"X-Real-IP":       "$remote_addr",
-				"X-Forwarded-For": "$proxy_add_x_forwarded_for",
+				"Host":              "$best_http_host",
+				"X-Real-IP":         "$remote_addr",
+				"X-Forwarded-For":   "$remote_addr",
+				"X-Forwarded-Host":  "$best_http_host",
+				"X-Forwarded-Port":  "$pass_port",
+				"X-Forwarded-Proto": "$pass_access_scheme",
+				"X-Scheme":          "$pass_access_scheme",
+				// mitigate HTTPoxy Vulnerability
+				// https://www.nginx.com/blog/mitigating-the-httpoxy-vulnerability-with-nginx/
+				"Proxy": "\"\"",
 			},
 		},
 	}

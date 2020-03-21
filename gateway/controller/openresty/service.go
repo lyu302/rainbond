@@ -20,17 +20,19 @@ package openresty
 
 import (
 	"bytes"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/goodrain/rainbond/gateway/controller/openresty/nginxcmd"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/golang/glog"
@@ -39,19 +41,18 @@ import (
 	"github.com/goodrain/rainbond/gateway/controller/openresty/template"
 	v1 "github.com/goodrain/rainbond/gateway/v1"
 	"github.com/goodrain/rainbond/util"
-	"github.com/goodrain/rainbond/util/cert"
 )
 
 // OrService handles the business logic of OpenrestyService
 type OrService struct {
 	IsShuttingDown *bool
-
 	// stopLock is used to enforce that only a single call to Stop send at
 	// a given time. We allow stopping through an HTTP endpoint and
 	// allowing concurrent stoppers leads to stack traces.
 	stopLock      *sync.Mutex
 	ocfg          *option.Config
 	nginxProgress *os.Process
+	configManage  *template.NginxConfigFileTemplete
 }
 
 //CreateOpenrestyService create openresty service
@@ -77,15 +78,26 @@ type Server struct {
 }
 
 // Start starts nginx
-func (o *OrService) Start(errCh chan error) {
-	defaultNginxConf = path.Join(template.CustomConfigPath, "nginx.conf")
+func (o *OrService) Start(errCh chan error) error {
+	logrus.Infof("openresty server starting")
+	templete, err := template.NewNginxConfigFileTemplete()
+	if err != nil {
+		logrus.Errorf("create config template manage failure %s", err.Error())
+		return err
+	}
+	o.configManage = templete
+	defaultNginxConf := path.Join(o.configManage.GetConfigFileDirPath(), "nginx.conf")
+	nginxcmd.SetDefaultNginxConf(defaultNginxConf)
 	// delete the old configuration
-	if !util.DirIsEmpty(template.CustomConfigPath) {
-		dirs, _ := util.GetDirNameList(template.CustomConfigPath, 1)
+	if !util.DirIsEmpty(o.configManage.GetConfigFileDirPath()) {
+		dirs, _ := util.GetDirNameList(o.configManage.GetConfigFileDirPath(), 1)
 		for _, dir := range dirs {
-			err := os.RemoveAll(fmt.Sprintf("%s/%s", template.CustomConfigPath, dir))
+			path := fmt.Sprintf("%s/%s", o.configManage.GetConfigFileDirPath(), dir)
+			err := os.RemoveAll(path)
 			if err != nil {
-				logrus.Warningf("error removing %s: %v", dir, err)
+				logrus.Warningf("error removing %s: %v", path, err)
+			} else {
+				logrus.Debugf("remove old dir %s", path)
 			}
 		}
 		os.RemoveAll(defaultNginxConf)
@@ -93,40 +105,36 @@ func (o *OrService) Start(errCh chan error) {
 	// generate default nginx.conf
 	nginx := model.NewNginx(*o.ocfg)
 	nginx.HTTP = model.NewHTTP(o.ocfg)
-	if err := template.NewNginxTemplate(nginx, defaultNginxConf); err != nil {
-		errCh <- fmt.Errorf("Can't not new nginx ocfg: %s", err.Error())
-		return
+	nginx.Stream = model.NewStream(o.ocfg)
+	if err := o.configManage.NewNginxTemplate(nginx); err != nil {
+		logrus.Errorf("init openresty config failure %s", err.Error())
+		return err
 	}
-	if o.ocfg.EnableRbdEndpoints {
-		if err := o.newRbdServers(); err != nil {
-			showErr := fmt.Errorf("create rainbond default server config failure %s", err.Error())
-			logrus.Error(showErr.Error())
-			errCh <- showErr
-		}
-	}
+	logrus.Infof("init openresty config success")
 	go func() {
 		for {
-			cmd := nginxExecCommand()
+			logrus.Infof("start openresty progress")
+			cmd := nginxcmd.CreateNginxCommand()
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Start(); err != nil {
-				logrus.Errorf("NGINX start error: %v", err)
+				logrus.Errorf("openresty start error: %v", err)
 				errCh <- err
 				return
 			}
 			o.nginxProgress = cmd.Process
-			logrus.Infof("nginx is starting")
 			if err := cmd.Wait(); err != nil {
 				errCh <- err
 			}
 		}
 	}()
+	return nil
 }
 
-// Stop gracefully stops the NGINX master process.
+// Stop gracefully stops the openresty master process.
 func (o *OrService) Stop() error {
-	// send stop signal to NGINX
-	logrus.Info("Stopping NGINX process")
+	// send stop signal to openresty
+	logrus.Info("Stopping openresty process")
 	if o.nginxProgress != nil {
 		if err := o.nginxProgress.Signal(syscall.SIGTERM); err != nil {
 			return err
@@ -137,78 +145,58 @@ func (o *OrService) Stop() error {
 
 // PersistConfig persists ocfg
 func (o *OrService) PersistConfig(conf *v1.Config) error {
-	if err := o.persistUpstreams(conf.TCPPools, "upstreams-tcp.tmpl", template.CustomConfigPath, "stream/upstreams.conf"); err != nil {
-		logrus.Errorf("fail to persist tcp upstreams.conf")
-	}
-
 	l7srv, l4srv := getNgxServer(conf)
-	// http
-	if len(l7srv) > 0 {
-		filename := "http/servers.conf"
-		if err := template.NewServerTemplate(&template.ServerContext{
-			Servers: l7srv,
-			Set:     *o.ocfg,
-		}, filename); err != nil {
-			logrus.Errorf("Fail to new nginx Server ocfg file: %v", err)
-			return err
-		}
-	}
-
-	// stream
-	if len(l4srv) > 0 {
-		filename := "stream/servers.conf"
-		if err := template.NewServerTemplate(&template.ServerContext{
-			Servers: l4srv,
-			Set:     *o.ocfg,
-		}, filename); err != nil {
-			logrus.Errorf("Fail to new nginx Server file: %v", err)
-			return err
-		}
-	}
-
-	// check nginx configuration
-	if out, err := nginxExecCommand("-t").CombinedOutput(); err != nil {
-		return fmt.Errorf("%v\n%v", err, string(out))
-	}
-	logrus.Debug("Nginx configuration is ok.")
+	// http server
+	o.configManage.WriteServer(*o.ocfg, "http", "", l7srv...)
+	// tcp and udp server
+	o.configManage.WriteServer(*o.ocfg, "stream", "", l4srv...)
 
 	// reload nginx
-	if out, err := nginxExecCommand("-s", "reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("%v\n%v", err, string(out))
+	if err := nginxcmd.Reload(); err != nil {
+		logrus.Errorf("Nginx reloads falure %s", err.Error())
+		return err
 	}
 	logrus.Debug("Nginx reloads successfully.")
-
 	return nil
 }
 
 // persistUpstreams persists upstreams
-func (o *OrService) persistUpstreams(pools []*v1.Pool, tmpl string, path string, filename string) error {
-	var upstreams []*model.Upstream
+func (o *OrService) persistUpstreams(pools []*v1.Pool) error {
+	streams := make([]model.Backend, 0)
 	for _, pool := range pools {
-		upstream := &model.Upstream{}
-		upstream.Name = pool.Name
-		upstream.UseLeastConn = pool.LeastConn
-		var servers []model.UServer
+		var endpoints []model.Endpoint
 		for _, node := range pool.Nodes {
-			server := model.UServer{
-				Address: node.Host + ":" + fmt.Sprintf("%v", node.Port),
-				Params: model.Params{
-					Weight:      1,
-					MaxFails:    node.MaxFails,
-					FailTimeout: node.FailTimeout,
-				},
-			}
-			servers = append(servers, server)
+			endpoints = append(endpoints, model.Endpoint{
+				Address: node.Host,
+				Port:    strconv.Itoa(int(node.Port)),
+			})
 		}
-		upstream.Servers = servers
-		upstreams = append(upstreams, upstream)
+		streams = append(streams, model.Backend{
+			Name:      pool.Name,
+			Endpoints: endpoints,
+		})
 	}
-	if len(upstreams) > 0 {
-		if err := template.NewUpstreamTemplateWithCfgPath(upstreams, tmpl, path, filename); err != nil {
-			logrus.Errorf("Fail to new nginx Upstream ocfg file: %v", err)
-			return err
-		}
+
+	buf, err := json.Marshal(streams)
+	if err != nil {
+		return err
 	}
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%v", o.ocfg.ListenPorts.Stream))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	_, err = conn.Write(buf)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(conn, "\r\n")
+	if err != nil {
+		return err
+	}
+	logrus.Debug("dynamically update tcp and udp Upstream success")
 	return nil
 }
 
@@ -216,6 +204,7 @@ func getNgxServer(conf *v1.Config) (l7srv []*model.Server, l4srv []*model.Server
 	for _, vs := range conf.L7VS {
 		server := &model.Server{
 			Listen:     strings.Join(vs.Listening, " "),
+			Protocol:   "HTTP",
 			ServerName: strings.Replace(vs.ServerName, "tls", "", 1),
 			// ForceSSLRedirect: vs.ForceSSLRedirect,
 			OptionValue: map[string]string{
@@ -223,7 +212,6 @@ func getNgxServer(conf *v1.Config) (l7srv []*model.Server, l4srv []*model.Server
 				"service_id": vs.ServiceID,
 			},
 		}
-
 		if vs.SSLCert != nil {
 			server.SSLCertificate = vs.SSLCert.CertificatePem
 			server.SSLCertificateKey = vs.SSLCert.CertificatePem
@@ -246,11 +234,12 @@ func getNgxServer(conf *v1.Config) (l7srv []*model.Server, l4srv []*model.Server
 
 	for _, vs := range conf.L4VS {
 		server := &model.Server{
-			ProxyPass: vs.PoolName,
+			Protocol: string(vs.Protocol),
 			OptionValue: map[string]string{
 				"tenant_id":  vs.Namespace,
 				"service_id": vs.ServiceID,
 			},
+			UpstreamName: vs.PoolName,
 		}
 		server.Listen = strings.Join(vs.Listening, " ")
 		l4srv = append(l4srv, server)
@@ -264,25 +253,13 @@ func (o *OrService) UpdatePools(hpools []*v1.Pool, tpools []*v1.Pool) error {
 	var lock sync.Mutex
 	lock.Lock()
 	defer lock.Unlock()
+	logrus.Debugf("start update pools(tcp pools count %d, http pool count %d)", len(tpools), len(hpools))
 	if len(tpools) > 0 {
-		err := o.persistUpstreams(tpools, "upstreams-tcp.tmpl", "/run/nginx/rainbond/stream",
-			"upstream.default.tcp.conf")
+		err := o.persistUpstreams(tpools)
 		if err != nil {
 			logrus.Warningf("error updating upstream.default.tcp.conf")
 		}
-		// check nginx configuration
-		if out, err := nginxExecCommand("-t").CombinedOutput(); err != nil {
-			return fmt.Errorf("%v\n%v", err, string(out))
-		}
-		logrus.Debug("Nginx configuration is ok.")
-
-		// reload nginx
-		if out, err := nginxExecCommand("-s", "reload").CombinedOutput(); err != nil {
-			return fmt.Errorf("%v\n%v", err, string(out))
-		}
-		logrus.Debug("Nginx reloads successfully for tcp pool.")
 	}
-
 	if hpools == nil || len(hpools) == 0 {
 		return nil
 	}
@@ -299,7 +276,7 @@ func (o *OrService) updateBackends(backends []*model.Backend) error {
 	if err := post(url, backends); err != nil {
 		return err
 	}
-	logrus.Infof("dynamically update Upstream success")
+	logrus.Debug("dynamically update http Upstream success")
 	return nil
 }
 
@@ -339,132 +316,4 @@ func (o *OrService) WaitPluginReady() {
 		logrus.Infof("Nginx is not ready yet: %v", err)
 		time.Sleep(1 * time.Second)
 	}
-}
-
-// newRbdServers creates new configuration file for Rainbond servers
-func (o *OrService) newRbdServers() error {
-	cfgPath := "/run/nginx/rainbond"
-	httpCfgPath := fmt.Sprintf("%s/%s", cfgPath, "http")  // http config path
-	tcpCfgPath := fmt.Sprintf("%s/%s", cfgPath, "stream") // tcp config path
-	// delete the old configuration
-	if err := os.RemoveAll(httpCfgPath); err != nil {
-		logrus.Errorf("Cant not remove directory(%s): %v", httpCfgPath, err)
-		return err
-	}
-	if err := os.RemoveAll(tcpCfgPath); err != nil {
-		logrus.Errorf("Cant not remove directory(%s): %v", tcpCfgPath, err)
-		return err
-	}
-
-	// create cert
-	err := createCert(cfgPath, "goodrain.me")
-	if err != nil {
-		return err
-	}
-	if o.ocfg.EnableKApiServer {
-		ksrv := kubeApiserver(o.ocfg.KApiServerIP)
-		if err := template.NewServerTemplateWithCfgPath(
-			&template.ServerContext{
-				Servers: []*model.Server{ksrv},
-				Set:     *o.ocfg,
-			}, tcpCfgPath, "server.default.tcp.conf"); err != nil {
-			return err
-		}
-		dummyUpstream := &model.Upstream{
-			Name: "kube_apiserver",
-			Servers: []model.UServer{
-				{
-					Address: "0.0.0.1:65535", // placeholder
-					Params: model.Params{
-						Weight: 1,
-					},
-				},
-			},
-		}
-		if err := template.NewUpstreamTemplateWithCfgPath(
-			[]*model.Upstream{dummyUpstream},
-			"upstreams-tcp.tmpl",
-			tcpCfgPath,
-			"upstream.default.tcp.conf"); err != nil {
-			return err
-		}
-	}
-
-	var srv []*model.Server
-	if o.ocfg.EnableLangGrMe {
-		lesrv := langGoodrainMe(o.ocfg.LangGrMeIP)
-		srv = append(srv, lesrv)
-	}
-	if o.ocfg.EnableMVNGrMe {
-		mesrv := mavenGoodrainMe(o.ocfg.MVNGrMeIP)
-		srv = append(srv, mesrv)
-	}
-	if o.ocfg.EnableGrMe {
-		gesrv := goodrainMe(cfgPath, o.ocfg.GrMeIP)
-		srv = append(srv, gesrv)
-	}
-	if o.ocfg.EnableRepoGrMe {
-		resrv := repoGoodrainMe(o.ocfg.RepoGrMeIP)
-		srv = append(srv, resrv)
-	}
-	if err := template.NewServerTemplateWithCfgPath(&template.ServerContext{
-		Servers: srv,
-		Set:     *o.ocfg,
-	}, httpCfgPath,
-		"servers.default.http.conf"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func createCert(cfgPath string, cn string) error {
-	p := fmt.Sprintf("%s/%s", cfgPath, "ssl")
-	crtexists, crterr := util.FileExists(fmt.Sprintf("%s/%s", p, "server.crt"))
-	keyexists, keyerr := util.FileExists(fmt.Sprintf("%s/%s", p, "server.key"))
-	if (crtexists && crterr == nil) && (keyexists && keyerr == nil) {
-		logrus.Info("certificate for goodrain.me exists.")
-		return nil
-	}
-
-	exists, err := util.FileExists(p)
-	if !exists || err != nil {
-		if e := os.MkdirAll(p, 0777); e != nil {
-			return e
-		}
-	}
-
-	baseinfo := cert.CertInformation{Country: []string{"CN"}, Organization: []string{"Goodrain"}, IsCA: true,
-		OrganizationalUnit: []string{"Rainbond"}, EmailAddress: []string{"zengqg@goodrain.com"},
-		Locality: []string{"BeiJing"}, Province: []string{"BeiJing"}, CommonName: cn,
-		Domains: []string{"goodrain.me"},
-		CrtName: fmt.Sprintf("%s/%s", cfgPath, "ssl/ca.pem"),
-		KeyName: fmt.Sprintf("%s/%s", cfgPath, "ssl/ca.key")}
-
-	if err := cert.CreateCRT(nil, nil, baseinfo); err != nil {
-		logrus.Errorf("Create crt error: %s ", err.Error())
-		return err
-	}
-	crtInfo := baseinfo
-	crtInfo.IsCA = false
-	crtInfo.CrtName = fmt.Sprintf("%s/%s", cfgPath, "ssl/server.crt")
-	crtInfo.KeyName = fmt.Sprintf("%s/%s", cfgPath, "ssl/server.key")
-	crtInfo.Names = []pkix.AttributeTypeAndValue{
-		pkix.AttributeTypeAndValue{
-			Type:  asn1.ObjectIdentifier{2, 1, 3},
-			Value: "MAC_ADDR",
-		},
-	}
-
-	crt, pri, err := cert.Parse(baseinfo.CrtName, baseinfo.KeyName)
-	if err != nil {
-		logrus.Errorf("Parse crt error,Error info: %s", err.Error())
-		return err
-	}
-	err = cert.CreateCRT(crt, pri, crtInfo)
-	if err != nil {
-		logrus.Errorf("Create crt error,Error info: %s", err.Error())
-		return err
-	}
-	logrus.Info("Create certificate for goodrain.me successfully")
-	return nil
 }

@@ -32,8 +32,8 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
+	etcdutil "github.com/goodrain/rainbond/util/etcd"
 )
 
 //CallbackUpdate 每次返还变化
@@ -61,19 +61,11 @@ type Discover interface {
 
 //GetDiscover 获取服务发现管理器
 func GetDiscover(opt config.DiscoverConfig) (Discover, error) {
-	if opt.EtcdClusterEndpoints == nil || len(opt.EtcdClusterEndpoints) == 0 {
-		return nil, fmt.Errorf("no etcd server endpoints")
-	}
 	if opt.Ctx == nil {
 		opt.Ctx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(opt.Ctx)
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:        opt.EtcdClusterEndpoints,
-		AutoSyncInterval: time.Second * 30,
-		DialTimeout:      time.Second * 10,
-		Context:          ctx,
-	})
+	client, err := etcdutil.NewClient(ctx, opt.EtcdClientArgs)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -227,10 +219,10 @@ func (e *etcdDiscover) removeProject(name string) {
 }
 
 func (e *etcdDiscover) discover(name string, callback CallbackUpdate) {
-	defer e.removeProject(name)
 	watchChan, err := e.watcher.WatchList(e.ctx, fmt.Sprintf("%s/backends/%s/servers", e.prefix, name), "")
 	if err != nil {
 		callback.Error(err)
+		e.removeProject(name)
 		return
 	}
 	defer watchChan.Stop()
@@ -271,6 +263,10 @@ func (e *etcdDiscover) discover(name string, callback CallbackUpdate) {
 			}
 		case watch.Error:
 			callback.Error(event.Error)
+			logrus.Debugf("monitor discover get watch error: %s, remove this watch target first, and then sleep 10 sec, we will re-watch it", event.Error.Error())
+			e.removeProject(name)
+			time.Sleep(10 * time.Second)
+			e.AddUpdateProject(name, callback)
 			return
 		}
 	}
